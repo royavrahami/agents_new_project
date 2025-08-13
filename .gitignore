@@ -1,0 +1,44 @@
+# Root .gitignore to keep the repo clean and portable
+
+# Node/Next.js
+**/node_modules/
+**/.next/
+**/.turbo/
+**/out/
+**/build/
+**/coverage/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.coverage*
+htmlcov/
+dist/
+build/
+*.egg-info/
+.eggs/
+
+# Env & secrets
+.env
+.env.*
+!.env.example
+
+# IDE/OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+
