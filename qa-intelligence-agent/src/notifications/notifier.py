@@ -1,26 +1,35 @@
 """
-Notifier – sends alerts and report summaries via configured channels:
-  - Email (SMTP/TLS)
-  - Slack (Bot API)
-  - Console (always active – rich formatted output)
+Notifier – sends the full QA Intelligence Report via configured channels:
+  - Email  : full HTML report embedded in email body + HTML file attached
+  - Slack  : summary + alert trends via Bot API
+  - Console: rich formatted summary (always active)
 
-Only channels that are fully configured in settings are activated.
-All errors are caught and logged – notification failure never crashes the agent.
+Channels activate automatically when settings are present.
+All failures are caught and logged – never crash the agent.
+
+Gmail setup:
+  1. Enable 2-Step Verification on your Google account
+  2. Go to: https://myaccount.google.com/apppasswords
+  3. Create an App Password (select "Mail" + your device)
+  4. Use that 16-char password as SMTP_PASSWORD (not your regular password)
 """
 
 from __future__ import annotations
 
 import logging
 import smtplib
+from datetime import datetime, timezone
+from email import encoders
+from email.mime.base import MIMEBase
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from pathlib import Path
 from typing import Optional
 
+from rich import box
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
-from rich import box
 
 from src.config.settings import settings
 from src.storage.models import Trend
@@ -28,14 +37,23 @@ from src.storage.models import Trend
 logger = logging.getLogger(__name__)
 console = Console()
 
+_CATEGORY_ICONS = {
+    "genai": "🤖",
+    "agents": "🕵️",
+    "qa_testing": "🧪",
+    "devops": "⚙️",
+    "tools": "🛠️",
+    "project_management": "📋",
+}
+
 
 class Notifier:
     """
     Multi-channel notification dispatcher.
 
-    Channels are activated automatically when the required settings are present:
-      - Email: requires smtp_user, smtp_password, notify_email
-      - Slack: requires slack_bot_token, slack_channel
+    Activated channels (auto-detected from settings):
+      - Email : SMTP_USER + SMTP_PASSWORD + NOTIFY_EMAIL all set
+      - Slack : SLACK_BOT_TOKEN set
     """
 
     def send(
@@ -47,22 +65,26 @@ class Notifier:
         Dispatch notifications to all configured channels.
 
         Args:
-            alert_trends: Trends that require immediate attention.
-            report_path:  Path to the generated HTML report.
+            alert_trends: High-momentum trends requiring immediate attention.
+            report_path:  Path to the generated HTML report file.
         """
         self._console_output(alert_trends, report_path)
 
         if settings.smtp_user and settings.smtp_password and settings.notify_email:
             self._send_email(alert_trends, report_path)
+        else:
+            logger.info(
+                "Email not configured – set SMTP_USER, SMTP_PASSWORD, NOTIFY_EMAIL to enable"
+            )
 
         if settings.slack_bot_token:
             self._send_slack(alert_trends, report_path)
 
-    # ── Console Output ────────────────────────────────────────────────────────
+    # ── Console ───────────────────────────────────────────────────────────────
 
     @staticmethod
     def _console_output(alert_trends: list[Trend], report_path: Optional[Path]) -> None:
-        """Print a rich formatted summary to the terminal."""
+        """Print a rich-formatted summary to the terminal."""
         console.print()
 
         if alert_trends:
@@ -76,7 +98,6 @@ class Notifier:
             table.add_column("Category", style="cyan")
             table.add_column("Momentum", style="yellow", justify="right")
             table.add_column("Articles", justify="right")
-
             for trend in alert_trends:
                 table.add_row(
                     trend.name,
@@ -94,7 +115,7 @@ class Notifier:
 
         if report_path:
             console.print(Panel(
-                f"[bold blue]Report saved to:[/bold blue]\n{report_path}",
+                f"[bold blue]Report:[/bold blue] {report_path}",
                 title="📄 Report Generated",
                 border_style="blue",
             ))
@@ -107,62 +128,170 @@ class Notifier:
         alert_trends: list[Trend],
         report_path: Optional[Path],
     ) -> None:
-        """Send an HTML email notification."""
-        subject = self._build_email_subject(alert_trends)
-        html_body = self._build_email_body(alert_trends, report_path)
+        """
+        Build and send a rich HTML email that contains:
+          - Executive summary banner
+          - Alert trends section (if any)
+          - Full embedded HTML report (inline in email body)
+          - HTML report attached as a .html file
+        """
+        now = datetime.now(timezone.utc)
+        date_str = now.strftime("%d %b %Y")
+        subject = self._build_subject(alert_trends, date_str)
 
-        msg = MIMEMultipart("alternative")
+        # Read the HTML report content
+        report_html = ""
+        report_filename = ""
+        if report_path and report_path.exists():
+            report_html = report_path.read_text(encoding="utf-8")
+            report_filename = report_path.name
+
+        # Build the email wrapper (summary + embedded report)
+        email_body = self._build_email_html(
+            alert_trends=alert_trends,
+            report_html=report_html,
+            date_str=date_str,
+        )
+
+        # Assemble multipart email: body + attachment
+        msg = MIMEMultipart("mixed")
         msg["Subject"] = subject
-        msg["From"] = settings.smtp_user
+        msg["From"] = f"QA Intelligence Agent <{settings.smtp_user}>"
         msg["To"] = settings.notify_email
-        msg.attach(MIMEText(html_body, "html", "utf-8"))
 
+        # Part 1: HTML body
+        msg.attach(MIMEText(email_body, "html", "utf-8"))
+
+        # Part 2: HTML file attachment (so the user can open it locally)
+        if report_html and report_filename:
+            attachment = MIMEBase("text", "html")
+            attachment.set_payload(report_html.encode("utf-8"))
+            encoders.encode_base64(attachment)
+            attachment.add_header(
+                "Content-Disposition",
+                "attachment",
+                filename=report_filename,
+            )
+            msg.attach(attachment)
+
+        # Send
         try:
             with smtplib.SMTP(settings.smtp_host, settings.smtp_port) as server:
                 server.ehlo()
                 server.starttls()
                 server.login(settings.smtp_user, settings.smtp_password)
-                server.sendmail(settings.smtp_user, settings.notify_email, msg.as_string())
-            logger.info("Email notification sent to %s", settings.notify_email)
+                server.sendmail(
+                    settings.smtp_user,
+                    settings.notify_email,
+                    msg.as_string(),
+                )
+            logger.info(
+                "Email report sent to %s (subject: %s)",
+                settings.notify_email,
+                subject,
+            )
+        except smtplib.SMTPAuthenticationError:
+            logger.error(
+                "Email authentication failed. "
+                "For Gmail, use an App Password: https://myaccount.google.com/apppasswords"
+            )
         except Exception as exc:
-            logger.error("Failed to send email notification: %s", exc)
+            logger.error("Failed to send email: %s", exc)
 
     @staticmethod
-    def _build_email_subject(alert_trends: list[Trend]) -> str:
+    def _build_subject(alert_trends: list[Trend], date_str: str) -> str:
         if alert_trends:
-            return f"🚨 QA Intelligence Alert: {len(alert_trends)} trends require attention"
-        return "📊 QA Intelligence Report – New update available"
+            return f"🚨 [{date_str}] QA Intelligence – {len(alert_trends)} alerts require attention"
+        return f"📊 [{date_str}] QA Intelligence Report – New update ready"
 
     @staticmethod
-    def _build_email_body(alert_trends: list[Trend], report_path: Optional[Path]) -> str:
-        alert_section = ""
+    def _build_email_html(
+        alert_trends: list[Trend],
+        report_html: str,
+        date_str: str,
+    ) -> str:
+        """
+        Build the complete email HTML:
+          header banner → alert section → full report embedded inline.
+        """
+        # ── Alert section ──────────────────────────────────────────────────
         if alert_trends:
-            items = "".join(
-                f"<li><strong>{t.name}</strong> ({t.category}) – "
-                f"Momentum: {t.momentum_score:.1f} | Articles: {t.article_count}<br>"
-                f"{t.description or ''}</li>"
+            alert_items = "".join(
+                f"""
+                <div style="background:#fff8f8;border-left:4px solid #e94560;
+                            border-radius:6px;padding:12px 16px;margin:8px 0;">
+                  <strong style="color:#e94560;">
+                    {_CATEGORY_ICONS.get(t.category, "📌")} {t.name}
+                  </strong>
+                  <span style="background:#fde68a;color:#92400e;border-radius:9px;
+                               padding:2px 8px;font-size:0.75em;margin-left:8px;">ALERT</span>
+                  <p style="margin:6px 0 0;color:#374151;font-size:0.9em;">
+                    {t.description or ""}
+                  </p>
+                  <p style="margin:4px 0 0;color:#6b7280;font-size:0.8em;">
+                    Momentum: <strong>{t.momentum_score:.1f}</strong> &nbsp;|&nbsp;
+                    Articles: <strong>{t.article_count}</strong> &nbsp;|&nbsp;
+                    Category: {t.category}
+                  </p>
+                </div>"""
                 for t in alert_trends
             )
-            alert_section = f"""
-            <h2 style="color:#e94560;">🚨 Alert Trends</h2>
-            <ul>{items}</ul>"""
+            alert_block = f"""
+            <div style="margin:24px 0;">
+              <h2 style="color:#e94560;margin-bottom:12px;">🚨 Immediate Attention Required</h2>
+              {alert_items}
+            </div>"""
+        else:
+            alert_block = """
+            <div style="background:#f0fdf4;border:1px solid #86efac;border-radius:8px;
+                        padding:12px 16px;margin:24px 0;">
+              ✅ <strong style="color:#166534;">No critical alerts this cycle</strong>
+            </div>"""
 
+        # ── Divider before embedded report ────────────────────────────────
         report_section = ""
-        if report_path:
+        if report_html:
             report_section = f"""
-            <p>A full intelligence report has been generated:
-            <strong>{report_path.name}</strong></p>"""
+            <hr style="border:none;border-top:2px solid #e0e6ed;margin:32px 0;">
+            <p style="color:#6b7280;font-size:0.85em;margin-bottom:16px;">
+              📎 The full report is also attached as an HTML file.
+              Open the attachment in your browser for the best experience.
+            </p>
+            <!-- ═══ EMBEDDED FULL REPORT ═══ -->
+            {report_html}"""
 
-        return f"""
-        <html><body style="font-family: system-ui, sans-serif; max-width: 600px; margin: 0 auto;">
-        <h1 style="color:#0f3460;">🧪 QA Intelligence Update</h1>
-        {alert_section}
-        {report_section}
-        <hr>
-        <p style="color:#6b7280; font-size:0.8em;">
-        This message was sent by the QA Intelligence Agent running on your system.
-        </p>
-        </body></html>"""
+        return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>QA Intelligence Report – {date_str}</title>
+</head>
+<body style="margin:0;padding:0;background:#f5f7fa;font-family:system-ui,sans-serif;">
+
+  <!-- Header banner -->
+  <div style="background:linear-gradient(135deg,#0f3460 0%,#1a237e 100%);
+              color:white;padding:28px 32px;">
+    <h1 style="margin:0;font-size:1.6rem;font-weight:700;">🧪 QA Intelligence Report</h1>
+    <p style="margin:6px 0 0;opacity:0.75;font-size:0.9rem;">
+      {date_str} &nbsp;|&nbsp; Powered by OpenAI {settings.openai_model}
+    </p>
+  </div>
+
+  <!-- Body -->
+  <div style="max-width:960px;margin:0 auto;padding:24px;">
+    {alert_block}
+    {report_section}
+  </div>
+
+  <!-- Footer -->
+  <div style="text-align:center;padding:20px;color:#9ca3af;font-size:0.75em;
+              border-top:1px solid #e5e7eb;margin-top:32px;">
+    QA Intelligence Agent &nbsp;|&nbsp; Auto-generated &nbsp;|&nbsp; {date_str}
+  </div>
+
+</body>
+</html>"""
 
     # ── Slack ─────────────────────────────────────────────────────────────────
 
@@ -171,10 +300,9 @@ class Notifier:
         alert_trends: list[Trend],
         report_path: Optional[Path],
     ) -> None:
-        """Post a Slack message using the Slack SDK."""
+        """Post a Slack notification with alert summary."""
         try:
             from slack_sdk import WebClient
-            from slack_sdk.errors import SlackApiError
         except ImportError:
             logger.warning("slack_sdk not installed – Slack notifications disabled")
             return
@@ -186,7 +314,7 @@ class Notifier:
             client.chat_postMessage(
                 channel=settings.slack_channel,
                 blocks=blocks,
-                text="QA Intelligence Report",  # Fallback text
+                text="QA Intelligence Report",
             )
             logger.info("Slack notification sent to %s", settings.slack_channel)
         except Exception as exc:
@@ -194,28 +322,41 @@ class Notifier:
 
     @staticmethod
     def _build_slack_blocks(alert_trends: list[Trend], report_path: Optional[Path]) -> list[dict]:
-        """Build Slack Block Kit message payload."""
+        """Build Slack Block Kit payload."""
+        now = datetime.now(timezone.utc).strftime("%d %b %Y %H:%M UTC")
         blocks: list[dict] = [
             {
                 "type": "header",
-                "text": {"type": "plain_text", "text": "🧪 QA Intelligence Update", "emoji": True},
-            }
+                "text": {"type": "plain_text", "text": "🧪 QA Intelligence Report", "emoji": True},
+            },
+            {
+                "type": "context",
+                "elements": [{"type": "mrkdwn", "text": f"Generated: {now}"}],
+            },
         ]
 
         if alert_trends:
             alert_text = "\n".join(
-                f"• *{t.name}* ({t.category}) — momentum: {t.momentum_score:.1f}"
+                f"• *{_CATEGORY_ICONS.get(t.category, '')} {t.name}* "
+                f"({t.category}) — momentum: `{t.momentum_score:.1f}` | articles: `{t.article_count}`"
                 for t in alert_trends
             )
+            blocks.append({"type": "divider"})
             blocks.append({
                 "type": "section",
-                "text": {"type": "mrkdwn", "text": f"🚨 *Alert Trends:*\n{alert_text}"},
+                "text": {"type": "mrkdwn", "text": f"🚨 *Alert Trends – Immediate Attention:*\n{alert_text}"},
+            })
+        else:
+            blocks.append({
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": "✅ *No critical alerts this cycle*"},
             })
 
         if report_path:
+            blocks.append({"type": "divider"})
             blocks.append({
                 "type": "section",
-                "text": {"type": "mrkdwn", "text": f"📄 *Report:* `{report_path.name}`"},
+                "text": {"type": "mrkdwn", "text": f"📄 *Report file:* `{report_path.name}`"},
             })
 
         return blocks

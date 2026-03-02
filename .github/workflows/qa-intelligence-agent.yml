@@ -81,6 +81,11 @@ jobs:
           REPORTS_DIR=./reports
           LOG_LEVEL=INFO
           LOG_DIR=./logs
+          SMTP_HOST=smtp.gmail.com
+          SMTP_PORT=587
+          SMTP_USER=${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD=${{ secrets.SMTP_PASSWORD }}
+          NOTIFY_EMAIL=${{ secrets.NOTIFY_EMAIL }}
           ENVEOF
 
       # ── 6. Prepare directories ────────────────────────────────────────────
