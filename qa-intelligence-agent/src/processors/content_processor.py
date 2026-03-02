@@ -44,7 +44,7 @@ class ContentProcessor:
         scorer: RelevanceScorer,
         summarizer: Optional[Summarizer] = None,
         min_score: float = None,
-        batch_size: int = 30,
+        batch_size: int = 200,
     ) -> None:
         self._article_repo = article_repo
         self._source_repo = source_repo

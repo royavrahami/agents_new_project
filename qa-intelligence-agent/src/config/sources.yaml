@@ -179,12 +179,7 @@ web_sources:
     category: "qa_testing"
     relevance_boost: 15
 
-  # ── Product Hunt ────────────────────────────────────────────────────────────
-  - name: "Product Hunt – AI Tools"
-    url: "https://www.producthunt.com/topics/artificial-intelligence"
-    type: "product_hunt"
-    category: "tools"
-    relevance_boost: 8
+  # Product Hunt blocks automated access (403) – removed
 
 keywords:
   # Items containing these keywords get an extra relevance boost

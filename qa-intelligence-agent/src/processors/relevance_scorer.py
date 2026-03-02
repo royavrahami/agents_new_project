@@ -28,14 +28,32 @@ _HIGH_KW_SCORE = 8
 _MEDIUM_KW_SCORE = 3
 _LOW_KW_SCORE = 1
 
+# Larger bonuses so category-relevant articles naturally exceed the threshold
 _CATEGORY_BONUSES = {
-    "qa_testing": 10,
-    "agents": 8,
-    "genai": 8,
-    "devops": 4,
-    "tools": 4,
-    "project_management": 6,
+    "qa_testing":         20,
+    "agents":             18,
+    "genai":              18,
+    "devops":             8,
+    "tools":              6,
+    "project_management": 10,
+    "arxiv":              15,
 }
+
+# Built-in keywords that supplement sources.yaml (short-form terms missed by exact phrases)
+_BUILTIN_HIGH_KEYWORDS = [
+    "llm", "gpt", "claude", "gemini", "agent", "agents",
+    "test automation", "ai agent", "agentic", "genai", "rag",
+    "playwright", "selenium", "multi-agent", "mcp", "copilot",
+    "quality engineering", "shift left", "dora", "ci/cd",
+    "llm testing", "ai qa", "autonomous", "generative",
+]
+_BUILTIN_MEDIUM_KEYWORDS = [
+    "testing", "automation", "software testing", "machine learning",
+    "neural", "pipeline", "benchmark", "evaluation", "fine-tuning",
+    "devops", "deployment", "monitoring", "observability",
+    "agile", "scrum", "sprint", "defect", "bug", "regression",
+    "api testing", "performance", "load testing", "language model",
+]
 
 _FRESHNESS_HOURS = 48  # Max age in hours for freshness bonus
 
@@ -56,8 +74,9 @@ class RelevanceScorer:
         medium_keywords: list[str],
         low_keywords: list[str],
     ) -> None:
-        self._high_kw = [kw.lower() for kw in high_keywords]
-        self._medium_kw = [kw.lower() for kw in medium_keywords]
+        # Merge caller-supplied keywords with built-in lists (deduplicated)
+        self._high_kw = list({kw.lower() for kw in high_keywords + _BUILTIN_HIGH_KEYWORDS})
+        self._medium_kw = list({kw.lower() for kw in medium_keywords + _BUILTIN_MEDIUM_KEYWORDS})
         self._low_kw = [kw.lower() for kw in low_keywords]
 
     def score(self, article: Article, source: Source) -> float:
@@ -90,7 +109,7 @@ class RelevanceScorer:
         # 2. Source boost (from config, max 20)
         score += min(source.relevance_boost or 0, 20)
 
-        # 3. Category bonus (max 10)
+        # 3. Category bonus (max 20)
         score += _CATEGORY_BONUSES.get(article.category, 0)
 
         # 4. Freshness bonus (max 10)
