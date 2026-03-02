@@ -7,18 +7,8 @@
 
 rss_feeds:
   # ── GenAI & LLM ─────────────────────────────────────────────────────────────
-  - name: "The Batch (DeepLearning.AI)"
-    url: "https://www.deeplearning.ai/the-batch/feed/"
-    category: "genai"
-    relevance_boost: 10
-
-  - name: "OpenAI Blog"
-    url: "https://openai.com/blog/rss/"
-    category: "genai"
-    relevance_boost: 15
-
-  - name: "Anthropic News"
-    url: "https://www.anthropic.com/rss.xml"
+  - name: "OpenAI News"
+    url: "https://openai.com/news/rss.xml"
     category: "genai"
     relevance_boost: 15
 
@@ -37,6 +27,41 @@ rss_feeds:
     category: "agents"
     relevance_boost: 12
 
+  - name: "Last Week in AI"
+    url: "https://lastweekin.ai/feed"
+    category: "genai"
+    relevance_boost: 12
+
+  - name: "Ahead of AI (Sebastian Raschka)"
+    url: "https://magazine.sebastianraschka.com/feed"
+    category: "genai"
+    relevance_boost: 12
+
+  - name: "NLP / AI Newsletter (Elvis Saravia)"
+    url: "https://elvissaravia.substack.com/feed"
+    category: "genai"
+    relevance_boost: 10
+
+  - name: "AI Supremacy"
+    url: "https://aisupremacy.substack.com/feed"
+    category: "genai"
+    relevance_boost: 10
+
+  - name: "Ben's Bites (AI daily digest)"
+    url: "https://www.bensbites.com/feed"
+    category: "genai"
+    relevance_boost: 10
+
+  - name: "Medium – Generative AI"
+    url: "https://medium.com/feed/tag/generative-ai"
+    category: "genai"
+    relevance_boost: 6
+
+  - name: "Medium – AI Agents"
+    url: "https://medium.com/feed/tag/ai-agents"
+    category: "agents"
+    relevance_boost: 8
+
   # ── AI Agents & Automation ───────────────────────────────────────────────────
   - name: "Simon Willison's Blog"
     url: "https://simonwillison.net/atom/everything/"
@@ -54,30 +79,40 @@ rss_feeds:
     relevance_boost: 8
 
   # ── QA & Testing ────────────────────────────────────────────────────────────
-  - name: "Ministry of Testing"
-    url: "https://www.ministryoftesting.com/feed"
-    category: "qa_testing"
-    relevance_boost: 15
-
-  - name: "Test Automation University"
-    url: "https://testautomationu.applitools.com/feed.xml"
-    category: "qa_testing"
-    relevance_boost: 12
-
   - name: "Google Testing Blog"
     url: "https://testing.googleblog.com/feeds/posts/default"
     category: "qa_testing"
     relevance_boost: 12
 
-  - name: "StickyMinds (TechWell)"
-    url: "https://www.stickyminds.com/rss.xml"
-    category: "qa_testing"
-    relevance_boost: 8
-
   - name: "Applitools Blog"
     url: "https://applitools.com/blog/feed/"
     category: "qa_testing"
+    relevance_boost: 12
+
+  - name: "BrowserStack Blog"
+    url: "https://www.browserstack.com/blog/feed/"
+    category: "qa_testing"
     relevance_boost: 10
+
+  - name: "Mabl Blog (AI Testing)"
+    url: "https://www.mabl.com/blog/rss.xml"
+    category: "qa_testing"
+    relevance_boost: 10
+
+  - name: "Software Testing Help"
+    url: "https://www.softwaretestinghelp.com/feed/"
+    category: "qa_testing"
+    relevance_boost: 8
+
+  - name: "InfoQ – Software Quality"
+    url: "https://www.infoq.com/feed/?topic=software-quality"
+    category: "qa_testing"
+    relevance_boost: 10
+
+  - name: "Medium – QA Engineering"
+    url: "https://medium.com/feed/tag/qa-engineering"
+    category: "qa_testing"
+    relevance_boost: 8
 
   # ── DevOps & CI/CD ──────────────────────────────────────────────────────────
   - name: "Martin Fowler"
@@ -112,11 +147,6 @@ rss_feeds:
     relevance_boost: 4
 
   # ── Project Management ───────────────────────────────────────────────────────
-  - name: "PMI Blog"
-    url: "https://www.pmi.org/learning/publications/blogs/rss"
-    category: "project_management"
-    relevance_boost: 8
-
   - name: "Agile Alliance Blog"
     url: "https://www.agilealliance.org/feed/"
     category: "project_management"

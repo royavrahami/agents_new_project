@@ -111,24 +111,33 @@ class RSSCollector:
         """
         Fetch and parse a single RSS feed.
 
+        Strategy: try feedparser's built-in URL fetcher first (better encoding
+        detection), then fall back to requests+feedparser if that yields nothing.
+
         Returns:
             Number of new articles stored from this feed.
         """
         logger.debug("Fetching RSS feed: %s", source.url)
 
-        # Fetch raw feed content with a controlled timeout
-        try:
-            response = requests.get(
-                source.url,
-                headers={"User-Agent": _USER_AGENT},
-                timeout=_REQUEST_TIMEOUT,
-            )
-            response.raise_for_status()
-            feed = feedparser.parse(response.content)
-        except requests.RequestException as exc:
-            # Fall back to feedparser's built-in fetcher if requests fails
-            logger.debug("requests failed (%s), falling back to feedparser", exc)
-            feed = feedparser.parse(source.url)
+        # Strategy 1: feedparser fetches directly – handles charset/encoding best
+        feed = feedparser.parse(
+            source.url,
+            request_headers={"User-Agent": _USER_AGENT},
+        )
+
+        # Strategy 2: if feedparser got nothing, try via requests with a browser UA
+        if feed.bozo and not feed.entries:
+            try:
+                response = requests.get(
+                    source.url,
+                    headers={"User-Agent": _USER_AGENT},
+                    timeout=_REQUEST_TIMEOUT,
+                )
+                response.raise_for_status()
+                # Use decoded text to let feedparser detect encoding from content
+                feed = feedparser.parse(response.text)
+            except requests.RequestException as exc:
+                logger.debug("requests fallback also failed: %s", exc)
 
         if feed.bozo and not feed.entries:
             raise ValueError(f"Feed parse error: {feed.bozo_exception}")
