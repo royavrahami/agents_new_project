@@ -24,7 +24,7 @@ class Settings(BaseSettings):
 
     # ── OpenAI ────────────────────────────────────────────────────────────────
     openai_api_key: str = Field(default="", description="OpenAI API key")
-    openai_model: str = Field(default="gpt-4o-mini", description="OpenAI model name")
+    openai_model: str = Field(default="gpt-4o", description="OpenAI model name")
     openai_max_tokens: int = Field(default=2000, description="Max tokens per LLM call")
 
     # ── GitHub ────────────────────────────────────────────────────────────────
