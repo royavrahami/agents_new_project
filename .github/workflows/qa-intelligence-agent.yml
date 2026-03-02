@@ -1,0 +1,141 @@
+name: QA Intelligence Agent
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Triggers:
+#   - Scheduled: runs 4× per day (06:00, 12:00, 18:00, 00:00 UTC)
+#   - Manual:    GitHub Actions → "Run workflow" button
+# ─────────────────────────────────────────────────────────────────────────────
+
+on:
+  schedule:
+    - cron: "0 6,12,18,0 * * *"   # 4× daily
+  workflow_dispatch:
+    inputs:
+      min_relevance_score:
+        description: "Minimum relevance score (0–100)"
+        required: false
+        default: "40"
+      openai_model:
+        description: "OpenAI model (gpt-4o / gpt-4o-mini)"
+        required: false
+        default: "gpt-4o"
+
+permissions:
+  contents: write   # needed to commit reports back to the repo
+
+# Cancel any in-progress run if a new one is triggered
+concurrency:
+  group: qa-agent
+  cancel-in-progress: false   # never cancel – let the run finish
+
+jobs:
+  run-agent:
+    name: Run QA Intelligence Agent
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: qa-intelligence-agent
+
+    steps:
+      # ── 1. Checkout ───────────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0    # full history needed for git push later
+
+      # ── 2. Python setup ───────────────────────────────────────────────────
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: qa-intelligence-agent/requirements.txt
+
+      # ── 3. Install dependencies ───────────────────────────────────────────
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt --quiet
+
+      # ── 4. Restore database from previous run ─────────────────────────────
+      # Uses dawidd6/action-download-artifact to fetch the latest DB artifact.
+      # If no previous artifact exists (first run), this step is silently skipped.
+      - name: Restore agent database from previous run
+        uses: dawidd6/action-download-artifact@v6
+        with:
+          name: qa-agent-database
+          path: qa-intelligence-agent/data/
+          workflow_conclusion: success
+          if_no_artifact_found: ignore
+        continue-on-error: true   # first run has no artifact – that's fine
+
+      # ── 5. Configure environment ──────────────────────────────────────────
+      - name: Create .env configuration
+        run: |
+          cat > .env << 'ENVEOF'
+          OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}
+          OPENAI_MODEL=${{ github.event.inputs.openai_model || 'gpt-4o' }}
+          OPENAI_MAX_TOKENS=2000
+          DATABASE_URL=sqlite:///./data/qa_agent.db
+          MIN_RELEVANCE_SCORE=${{ github.event.inputs.min_relevance_score || '40' }}
+          SCHEDULE_INTERVAL_HOURS=6
+          REPORTS_DIR=./reports
+          LOG_LEVEL=INFO
+          LOG_DIR=./logs
+          ENVEOF
+
+      # ── 6. Prepare directories ────────────────────────────────────────────
+      - name: Create required directories
+        run: mkdir -p data reports logs
+
+      # ── 7. Run the agent ──────────────────────────────────────────────────
+      - name: Run QA Intelligence Agent
+        run: PYTHONPATH=. python3 main.py run
+        env:
+          PYTHONUNBUFFERED: "1"   # ensures logs are shown in real-time
+
+      # ── 8. Upload HTML report as artifact ─────────────────────────────────
+      - name: Upload report artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: qa-intelligence-report-${{ github.run_number }}
+          path: qa-intelligence-agent/reports/
+          retention-days: 30
+
+      # ── 9. Persist database for next run ──────────────────────────────────
+      - name: Save database for next run
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: qa-agent-database
+          path: qa-intelligence-agent/data/qa_agent.db
+          retention-days: 90
+          overwrite: true
+
+      # ── 10. Commit latest report back to repo ─────────────────────────────
+      # Pushes the newest HTML report into reports/ on main so it's viewable
+      # directly in GitHub without downloading an artifact.
+      - name: Commit latest report to repository
+        if: success()
+        run: |
+          # Find the most recently generated report
+          REPORT=$(ls -t reports/*.html 2>/dev/null | head -1)
+          if [ -z "$REPORT" ]; then
+            echo "No report generated – skipping commit"
+            exit 0
+          fi
+
+          git config user.name  "QA Intelligence Agent"
+          git config user.email "qa-agent@github-actions"
+
+          # Stage only the new report (avoid staging .env or other files)
+          git add "$REPORT" "${REPORT%.html}.md" 2>/dev/null || true
+
+          # Only commit if there are changes
+          if git diff --cached --quiet; then
+            echo "Report already committed – skipping"
+          else
+            TIMESTAMP=$(date -u +"%d %b %Y %H:%M UTC")
+            git commit -m "report(auto): QA Intelligence Report – $TIMESTAMP [skip ci]"
+            git push origin HEAD:main
+          fi
