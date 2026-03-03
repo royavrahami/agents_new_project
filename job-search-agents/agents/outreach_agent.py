@@ -27,9 +27,9 @@ from .base_agent import BaseAgent
 _LINKEDIN_MESSAGE_TEMPLATE = """
 Hi {contact_name},
 
-I noticed {company_name} {funding_note}is doing great work in {domain}.
-I'm a {candidate_role} with {experience_years}+ years of experience, 
-and I'd love to connect about any opportunities on your team.
+I noticed {company_name} {funding_note}is doing impressive work in {domain}.
+I'm a {candidate_role} with {experience_years}+ years of experience building QA organizations from scratch,
+leading quality architecture, and driving release governance across FinTech, Deep-Tech, and Enterprise environments.
 
 {personal_hook}
 
@@ -46,9 +46,10 @@ Hi {contact_name},
 
 {personal_hook}
 
-I'm reaching out because {company_name} {funding_note}stands out in the Israeli tech scene,
-and I believe my background as a {candidate_role} with {experience_years}+ years of experience
-could add real value to your team.
+I'm reaching out because {company_name} {funding_note}stands out in the Israeli tech scene.
+As a {candidate_role} with {experience_years}+ years of experience — including building QA departments
+from zero, implementing CI/CD quality gates, and reducing production escape rates by 35% —
+I believe I could bring real impact to your engineering organization.
 
 I'd love to schedule a quick 15-minute call to explore if there's a fit.
 

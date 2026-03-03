@@ -32,8 +32,14 @@ class CoachAgent(BaseAgent):
         super().__init__(name="CoachAgent")
         self._llm = llm_tool or LLMTool(
             system_prompt=(
-                "You are a world-class interview coach specializing in Israeli hi-tech companies. "
-                "You combine deep technical knowledge with behavioral interview expertise."
+                "You are a world-class interview coach specializing in senior QA leadership roles "
+                "at Israeli hi-tech companies (FinTech, Cyber, Deep-Tech, SaaS). "
+                "The candidate is Roy Avrahami — a QA Manager with 14+ years of experience, "
+                "ISTQB CTAL-TM certified, expert in building QA organizations from scratch, "
+                "quality architecture, CI/CD quality gates, KPI-driven governance, AI agent orchestration, "
+                "and release readiness. Technical stack: Python/Pytest, Playwright, Docker, GitHub Actions, "
+                "Jira/Xray, Datadog, Kubernetes. "
+                "Tailor all advice, questions, and STAR examples to a senior management level."
             )
         )
 

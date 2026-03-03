@@ -74,13 +74,31 @@ class Settings(BaseSettings):
     google_cse_id: str = Field(default="", description="Google Custom Search Engine ID")
 
     # --- Candidate profile ---
-    candidate_name: str = Field(default="Job Seeker")
-    candidate_role: str = Field(default="QA Automation Engineer")
+    candidate_name: str = Field(default="Roy Avrahami")
+    candidate_role: str = Field(default="QA Manager")
     candidate_location: str = Field(default="Israel")
-    candidate_experience_years: int = Field(default=5, ge=0)
+    candidate_experience_years: int = Field(default=14, ge=0)
+    candidate_summary: str = Field(
+        default=(
+            "QA Manager with 14+ years of experience leading QA strategy, quality architecture, "
+            "and cross-functional governance across Deep-Tech, FinTech, and Enterprise environments. "
+            "Specialize in building QA departments from scratch, CI/CD quality gates, release governance, "
+            "KPI-driven quality operating models, and AI Agent Orchestration. "
+            "Technical stack: Python, Pytest, Playwright, Selenium, Docker, GitHub Actions, Jira/Xray, Datadog, Kubernetes."
+        )
+    )
     target_companies: List[str] = Field(default_factory=list)
     target_keywords: List[str] = Field(
-        default_factory=lambda: ["QA", "Automation", "SDET", "Quality"]
+        default_factory=lambda: [
+            "QA Manager",
+            "Quality Engineering Manager",
+            "Head of QA",
+            "VP Quality",
+            "QA Lead",
+            "Quality Assurance Manager",
+            "Test Manager",
+            "SDET Manager",
+        ]
     )
 
     # --- Intel Agent ---
