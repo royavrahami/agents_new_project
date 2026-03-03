@@ -59,7 +59,7 @@ class GoogleSearchTool:
         self.rate_limit_delay = rate_limit_delay
         self._client = httpx.Client(timeout=15.0)
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
+    @retry(stop=stop_after_attempt(1))
     def search(self, query: str, language: str = "lang_he") -> List[GoogleSearchResult]:
         """
         Execute a Google Custom Search query.
@@ -97,6 +97,8 @@ class GoogleSearchTool:
                 f"Google API error | status={response.status_code} | "
                 f"query={query!r} | response={response.text[:300]}"
             )
+        if response.status_code == 429:
+            logger.warning("Google API daily quota exhausted (100 queries/day). Try again tomorrow.")
         response.raise_for_status()
 
         items = response.json().get("items", [])

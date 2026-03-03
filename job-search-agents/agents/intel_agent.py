@@ -75,9 +75,6 @@ class IntelAgent(BaseAgent):
         self._target_roles = target_roles or [
             settings.candidate_role,          # "QA Manager"
             "Head of QA",
-            "Quality Engineering Manager",
-            "QA Team Lead",
-            "VP Quality",
         ]
         self._target_keywords = target_keywords or settings.target_keywords
 
