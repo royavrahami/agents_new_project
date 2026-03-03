@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from datetime import datetime
+from pathlib import Path
 from typing import Generator
 from uuid import uuid4
 
@@ -24,6 +25,15 @@ from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from config.settings import settings
 from core.logger import logger
+
+
+# ---------------------------------------------------------------------------
+# Ensure the data directory exists before SQLite tries to create the file
+# ---------------------------------------------------------------------------
+
+if "sqlite" in settings.database_url:
+    db_path = settings.database_url.replace("sqlite:///", "")
+    Path(db_path).parent.mkdir(parents=True, exist_ok=True)
 
 
 # ---------------------------------------------------------------------------
