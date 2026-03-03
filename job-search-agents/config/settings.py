@@ -148,10 +148,24 @@ class Settings(BaseSettings):
     @field_validator("target_companies", "target_keywords", mode="before")
     @classmethod
     def parse_list_from_string(cls, v: object) -> object:
-        """Allow comma-separated strings from .env for list fields."""
+        """
+        Accept both formats from .env:
+          - Comma-separated: QA Manager,Head of QA,VP Quality
+          - JSON array:      ["QA Manager","Head of QA","VP Quality"]
+        pydantic-settings v2 tries JSON first; this validator handles both safely.
+        """
         if isinstance(v, str):
+            v = v.strip()
+            if not v:
+                return []
+            if v.startswith("["):
+                import json as _json
+                try:
+                    return _json.loads(v)
+                except Exception:
+                    pass
             return [item.strip() for item in v.split(",") if item.strip()]
-        return v
+        return v or []
 
 
 # Singleton instance — import this everywhere
