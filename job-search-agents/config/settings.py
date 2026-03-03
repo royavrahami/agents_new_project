@@ -73,6 +73,32 @@ class Settings(BaseSettings):
     google_api_key: str = Field(default="", description="Google Custom Search API key")
     google_cse_id: str = Field(default="", description="Google Custom Search Engine ID")
 
+    # --- CV Parser (Affinda/Textkernel) ---
+    affinda_api_key: str = Field(default="", description="Affinda CV parsing API key")
+    textkernel_api_key: str = Field(default="", description="Textkernel CV parsing API key")
+
+    # --- LinkedIn ---
+    linkedin_access_token: str = Field(default="", description="LinkedIn API access token")
+    linkedin_refresh_token: str = Field(default="", description="LinkedIn API refresh token")
+
+    # --- Email Discovery (Hunter.io / Apollo.io) ---
+    hunter_api_key: str = Field(default="", description="Hunter.io email discovery API key")
+    apollo_api_key: str = Field(default="", description="Apollo.io contact discovery API key")
+
+    # --- Comeet ---
+    comeet_api_key: str = Field(default="", description="Comeet job board API key")
+
+    # --- Gmail ---
+    gmail_access_token: str = Field(default="", description="Gmail API access token")
+    gmail_refresh_token: str = Field(default="", description="Gmail API refresh token")
+
+    # --- Calendly ---
+    calendly_api_key: str = Field(default="", description="Calendly API key")
+
+    # --- Caching & Rate Limiting ---
+    contact_cache_ttl_days: int = Field(default=30, ge=1, le=365, description="Contact discovery cache TTL in days")
+    company_research_cache_ttl_days: int = Field(default=30, ge=1, le=365, description="Company research cache TTL in days")
+
     # --- Candidate profile ---
     candidate_name: str = Field(default="Roy Avrahami")
     candidate_role: str = Field(default="QA Manager")

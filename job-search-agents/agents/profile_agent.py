@@ -19,6 +19,7 @@ from config.settings import settings
 from core.logger import logger
 from core.models import CVAnalysis, TailoredCV
 from tools.llm_tool import LLMTool
+from tools.cv_parser_tool import cv_parser
 
 from .base_agent import BaseAgent
 
@@ -115,7 +116,8 @@ class ProfileAgent(BaseAgent):
         Score a CV on ATS compatibility and keyword coverage.
 
         ATS scoring factors:
-        - Base structural score (no ATS killers, proper sections)
+        - Real CV parsing (Affinda API or fallback regex)
+        - Structural score (no ATS killers, proper sections)
         - Keyword match ratio against job description
         - LLM-based holistic assessment
 
@@ -128,20 +130,46 @@ class ProfileAgent(BaseAgent):
         """
         self.logger.info("Analyzing CV for ATS compatibility")
 
-        # Check for ATS killers
-        ats_issues = self._check_ats_killers(cv_text)
-        base_score = max(0.0, 100.0 - len(ats_issues) * 15)
+        # Step 1: Parse CV with real parser (Affinda or fallback)
+        parse_result = cv_parser.parse_cv(cv_text)
 
-        # Keyword analysis
+        if parse_result.get("success"):
+            self.logger.info(
+                f"CV parsed successfully via {parse_result.get('parsing_method')} "
+                f"({parse_result.get('parsing_success_rate', 0):.0f}% success)"
+            )
+        else:
+            self.logger.warning(f"CV parsing failed: {parse_result.get('error', 'Unknown error')}")
+
+        # Step 2: ATS compatibility scoring
+        ats_issues = parse_result.get("formatting_issues", [])
+        parsing_success = parse_result.get("parsing_success_rate", 50) / 100.0
+
+        # Base score from parsing success and ATS issues
+        base_score = (parsing_success * 60) + (max(0.0, 100.0 - len(ats_issues) * 10) * 0.4)
+
+        # Step 3: Keyword analysis
         jd_keywords = self._extract_keywords_from_jd(job_description) if job_description else []
         matched, missing = self._match_keywords(cv_text, jd_keywords)
-        keyword_coverage = len(matched) / max(len(jd_keywords), 1)
+
+        # Also check against parsed skills
+        parsed_skills = [s.get("name", "") for s in parse_result.get("skills_extracted", [])]
+        for skill in parsed_skills:
+            if skill.lower() in [m.lower() for m in matched]:
+                continue
+            matched.append(skill)
+
+        keyword_coverage = len(matched) / max(len(jd_keywords), 1) if jd_keywords else 0.5
         keyword_score = keyword_coverage * 40  # Up to 40 points for keywords
 
         raw_score = min(base_score * 0.6 + keyword_score, 100.0)
 
-        # LLM refinement — get qualitative recommendations
+        # Step 4: LLM refinement — get qualitative recommendations
         recommendations = self._get_llm_recommendations(cv_text, job_description, raw_score)
+
+        # Add parsing-specific recommendations if issues found
+        if ats_issues:
+            recommendations.insert(0, f"ATS issues detected: {', '.join(ats_issues[:3])}")
 
         # Adjust score based on recommendation severity
         score_adjustment = sum(
