@@ -91,6 +91,12 @@ class GoogleSearchTool:
 
         logger.debug(f"Google search query: {query!r}")
         response = self._client.get(GOOGLE_CSE_ENDPOINT, params=params)
+
+        if response.status_code != 200:
+            logger.error(
+                f"Google API error | status={response.status_code} | "
+                f"query={query!r} | response={response.text[:300]}"
+            )
         response.raise_for_status()
 
         items = response.json().get("items", [])
