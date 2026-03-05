@@ -6,7 +6,7 @@ import pytest
 import httpx
 import respx
 
-from tools.google_search_tool import GoogleSearchTool, GOOGLE_CSE_ENDPOINT
+from tools.google_search_tool import GoogleSearchTool, GoogleSearchResult, GOOGLE_CSE_ENDPOINT, QuotaExhaustedError
 
 
 class TestGoogleSearchToolSearch:
@@ -57,13 +57,87 @@ class TestGoogleSearchToolSearch:
         assert len(results) == 10  # API returns 10, tool returns all
 
     @respx.mock
-    def test_search_raises_on_http_error(self):
+    def test_search_raises_on_server_error(self):
         respx.get(GOOGLE_CSE_ENDPOINT).mock(
-            return_value=httpx.Response(403, json={"error": "Forbidden"})
+            return_value=httpx.Response(500, json={"error": "Internal Server Error"})
         )
         tool = GoogleSearchTool(api_key="fake-key", cse_id="fake-cx", rate_limit_delay=0)
-        with pytest.raises(Exception):
+        with pytest.raises(httpx.HTTPStatusError):
             tool.search("test query")
+
+
+class TestGoogleSearchToolCircuitBreaker:
+    """Tests for the quota-exhausted circuit-breaker."""
+
+    @respx.mock
+    def test_429_trips_circuit_breaker(self):
+        respx.get(GOOGLE_CSE_ENDPOINT).mock(
+            return_value=httpx.Response(429, json={"error": {"message": "Quota exceeded"}})
+        )
+        tool = GoogleSearchTool(api_key="fake-key", cse_id="fake-cx", rate_limit_delay=0)
+        with pytest.raises(QuotaExhaustedError):
+            tool.search("first query")
+        assert tool._quota_exhausted is True
+
+    @respx.mock
+    def test_subsequent_calls_return_empty_after_429(self):
+        respx.get(GOOGLE_CSE_ENDPOINT).mock(
+            return_value=httpx.Response(429, json={"error": {"message": "Quota exceeded"}})
+        )
+        tool = GoogleSearchTool(api_key="fake-key", cse_id="fake-cx", rate_limit_delay=0)
+        with pytest.raises(QuotaExhaustedError):
+            tool.search("first query")
+
+        # Second call should return [] without making an HTTP request
+        results = tool.search("second query")
+        assert results == []
+        assert tool._quota_exhausted is True
+
+    @respx.mock
+    def test_400_key_expired_trips_circuit_breaker(self):
+        respx.get(GOOGLE_CSE_ENDPOINT).mock(
+            return_value=httpx.Response(400, json={"error": {"message": "API key expired"}})
+        )
+        tool = GoogleSearchTool(api_key="fake-key", cse_id="fake-cx", rate_limit_delay=0)
+        with pytest.raises(QuotaExhaustedError):
+            tool.search("test query")
+        assert tool._quota_exhausted is True
+
+    @respx.mock
+    def test_403_trips_circuit_breaker(self):
+        respx.get(GOOGLE_CSE_ENDPOINT).mock(
+            return_value=httpx.Response(403, json={"error": {"message": "Forbidden"}})
+        )
+        tool = GoogleSearchTool(api_key="fake-key", cse_id="fake-cx", rate_limit_delay=0)
+        with pytest.raises(QuotaExhaustedError):
+            tool.search("test query")
+        assert tool._quota_exhausted is True
+
+    def test_circuit_breaker_starts_open(self):
+        tool = GoogleSearchTool(api_key="fake-key", cse_id="fake-cx")
+        assert tool._quota_exhausted is False
+
+    @respx.mock
+    def test_no_http_call_after_circuit_breaker_tripped(self):
+        """After circuit-breaker trips, no further HTTP requests are made."""
+        call_count = 0
+
+        def counting_handler(request):
+            nonlocal call_count
+            call_count += 1
+            return httpx.Response(429, json={"error": {"message": "Quota exceeded"}})
+
+        respx.get(GOOGLE_CSE_ENDPOINT).mock(side_effect=counting_handler)
+        tool = GoogleSearchTool(api_key="fake-key", cse_id="fake-cx", rate_limit_delay=0)
+
+        with pytest.raises(QuotaExhaustedError):
+            tool.search("query 1")
+        assert call_count == 1
+
+        tool.search("query 2")
+        tool.search("query 3")
+        # No additional HTTP calls — still just the original 1
+        assert call_count == 1
 
 
 class TestGoogleSearchToolJobSearch:
@@ -76,7 +150,6 @@ class TestGoogleSearchToolJobSearch:
 
         def capture_request(request):
             import urllib.parse
-            # URL query params may be bytes — decode to string for comparison
             raw_params = dict(urllib.parse.parse_qsl(request.url.query))
             for k, v in raw_params.items():
                 key = k.decode() if isinstance(k, bytes) else k
@@ -103,4 +176,3 @@ class TestGoogleSearchToolContextManager:
     def test_context_manager_closes_client(self):
         with GoogleSearchTool() as tool:
             assert tool is not None
-        # No exception = client closed successfully

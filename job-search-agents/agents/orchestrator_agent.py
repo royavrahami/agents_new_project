@@ -11,14 +11,18 @@ Responsibilities:
 
 from __future__ import annotations
 
-import asyncio
 from datetime import datetime
+from uuid import uuid4
 from typing import Any, Dict, List, Optional
 
-from config.settings import settings
+from config.settings import JobSearchStatus, settings
 from core.database import init_db
-from core.logger import logger
-from core.models import HiddenJob, WeeklyReport
+from core.models import (
+    HiddenJob,
+    OrchestrationStage,
+    StageOutcome,
+    WeeklyReport,
+)
 
 from .base_agent import BaseAgent
 from .coach_agent import CoachAgent
@@ -48,6 +52,7 @@ class OrchestratorAgent(BaseAgent):
         outreach: Optional[OutreachAgent] = None,
         tracker: Optional[TrackerAgent] = None,
         coach: Optional[CoachAgent] = None,
+        max_stage_retries: int = 2,
     ) -> None:
         super().__init__(name="OrchestratorAgent")
         self.intel = intel or IntelAgent()
@@ -55,6 +60,10 @@ class OrchestratorAgent(BaseAgent):
         self.outreach = outreach or OutreachAgent()
         self.tracker = tracker or TrackerAgent()
         self.coach = coach or CoachAgent()
+        self.max_stage_retries = max(1, max_stage_retries)
+        self.hot_score_threshold = float(getattr(settings, "hot_job_threshold", 0.6))
+        self.escalation_hot_score = float(getattr(settings, "escalation_hot_score", 0.85))
+        self.max_outreach_jobs = int(getattr(settings, "outreach_daily_limit", 15))
 
     # ------------------------------------------------------------------
     # Main entry point
@@ -77,61 +86,94 @@ class OrchestratorAgent(BaseAgent):
         Returns:
             Full briefing dictionary with all agent results
         """
-        self.logger.info("=== ORCHESTRATOR: Starting daily cycle ===")
+        correlation_id = kwargs.get("correlation_id") or str(uuid4())
+        self.logger.info(
+            f"=== ORCHESTRATOR: Starting daily cycle (correlation_id={correlation_id}) ==="
+        )
         init_db()
 
         briefing: Dict[str, Any] = {
             "date": datetime.utcnow().isoformat(),
             "candidate": settings.candidate_name,
+            "correlation_id": correlation_id,
+            "stages": [],
+            "escalations": [],
         }
 
-        # ---- Step 1: Intel scan ----
-        self.logger.info("Step 1/5 — Intel scan")
-        intel_result = self.intel.execute()
+        # ---- Step 1: discover ----
+        discover_result = self._run_stage(
+            stage=OrchestrationStage.DISCOVER,
+            action=lambda: self.intel.execute(correlation_id=correlation_id),
+            max_attempts=self.max_stage_retries,
+        )
+        briefing["stages"].append(discover_result.model_dump(mode="json"))
+        intel_result = discover_result.data
+        hot_jobs: List[HiddenJob] = intel_result.get("hot_jobs", [])  # type: ignore[assignment]
+
         briefing["intel"] = {
             "funding_events": intel_result.get("funding_events", 0),
             "hidden_jobs_found": intel_result.get("hidden_jobs", 0),
-            "hot_jobs_count": len(intel_result.get("hot_jobs", [])),
+            "hot_jobs_count": len(hot_jobs),
         }
-        hot_jobs: List[HiddenJob] = intel_result.get("hot_jobs", [])
 
-        # ---- Step 2: Add hot jobs to tracker pipeline ----
-        self.logger.info("Step 2/5 — Adding hot jobs to pipeline")
-        for job in hot_jobs:
+        # ---- Step 2: prioritize ----
+        prioritize_result = self._run_stage(
+            stage=OrchestrationStage.PRIORITIZE,
+            action=lambda: self._prioritize_jobs(hot_jobs),
+            max_attempts=1,
+        )
+        briefing["stages"].append(prioritize_result.model_dump(mode="json"))
+        prioritized_jobs: List[HiddenJob] = prioritize_result.data.get("jobs", [])  # type: ignore[assignment]
+        high_priority_jobs = [
+            job for job in prioritized_jobs if job.hot_score >= self.escalation_hot_score
+        ]
+        if high_priority_jobs:
+            briefing["escalations"].append(
+                (
+                    "High-priority opportunities detected. "
+                    f"Immediate outreach triggered for {len(high_priority_jobs)} opportunities."
+                )
+            )
+
+        self.logger.info("Adding prioritized hot jobs to tracker pipeline")
+        for job in prioritized_jobs:
             self.tracker.add_opportunity(job)
 
-        # ---- Step 3: Profile analysis (if CV provided) ----
-        self.logger.info("Step 3/5 — Profile analysis")
-        if cv_text and hot_jobs:
-            top_job = hot_jobs[0]
-            profile_result = self.profile.execute(
-                cv_text=cv_text,
-                job_description=top_job.description_snippet or "",
-            )
-            briefing["profile"] = {
-                "ats_score": profile_result.get("analysis", {}).ats_score
-                if hasattr(profile_result.get("analysis"), "ats_score")
-                else "N/A",
-                "top_recommendations": (
-                    profile_result.get("analysis").recommendations[:3]
-                    if hasattr(profile_result.get("analysis"), "recommendations")
-                    else []
-                ),
-            }
-        else:
-            briefing["profile"] = {"note": "No CV provided — skipped profile analysis"}
+        # ---- Step 3: tailor ----
+        tailor_result = self._run_stage(
+            stage=OrchestrationStage.TAILOR,
+            action=lambda: self._run_profile_stage(cv_text=cv_text, hot_jobs=prioritized_jobs, correlation_id=correlation_id),
+            max_attempts=1,
+        )
+        briefing["stages"].append(tailor_result.model_dump(mode="json"))
+        profile_result = tailor_result.data
+        briefing["profile"] = profile_result
 
-        # ---- Step 4: Outreach drafting ----
-        self.logger.info("Step 4/5 — Outreach drafting")
-        outreach_result = self.outreach.execute(hot_jobs=hot_jobs)
+        # ---- Step 4: outreach ----
+        jobs_for_outreach = high_priority_jobs if high_priority_jobs else prioritized_jobs
+        outreach_result_stage = self._run_stage(
+            stage=OrchestrationStage.OUTREACH,
+            action=lambda: self.outreach.execute(
+                hot_jobs=jobs_for_outreach[: self.max_outreach_jobs],
+                correlation_id=correlation_id,
+            ),
+            max_attempts=self.max_stage_retries,
+        )
+        briefing["stages"].append(outreach_result_stage.model_dump(mode="json"))
+        outreach_result = outreach_result_stage.data
         briefing["outreach"] = {
             "messages_drafted": outreach_result.get("messages_drafted", 0),
             "follow_ups_due": len(outreach_result.get("follow_ups_due", [])),
         }
 
-        # ---- Step 5: Tracker health check ----
-        self.logger.info("Step 5/5 — Tracker health check")
-        tracker_result = self.tracker.execute()
+        # ---- Step 5: track ----
+        tracker_result_stage = self._run_stage(
+            stage=OrchestrationStage.TRACK,
+            action=lambda: self.tracker.execute(correlation_id=correlation_id),
+            max_attempts=self.max_stage_retries,
+        )
+        briefing["stages"].append(tracker_result_stage.model_dump(mode="json"))
+        tracker_result = tracker_result_stage.data
         briefing["tracker"] = {
             "active_opportunities": tracker_result.get("kpis", {}).get("total_active", 0),
             "bottleneck": tracker_result.get("bottleneck"),
@@ -139,7 +181,22 @@ class OrchestratorAgent(BaseAgent):
             "recommended_actions": tracker_result.get("recommended_actions", []),
         }
 
-        # ---- Compose executive briefing ----
+        # ---- Step 6: coach ----
+        coach_result_stage = self._run_stage(
+            stage=OrchestrationStage.COACH,
+            action=lambda: self._run_coach_stage(correlation_id=correlation_id),
+            max_attempts=1,
+        )
+        briefing["stages"].append(coach_result_stage.model_dump(mode="json"))
+        briefing["coach"] = coach_result_stage.data
+
+        # ---- Step 7: summarize ----
+        summarize_stage = self._run_stage(
+            stage=OrchestrationStage.SUMMARIZE,
+            action=lambda: {"summary_text": self._compose_executive_summary(briefing)},
+            max_attempts=1,
+        )
+        briefing["stages"].append(summarize_stage.model_dump(mode="json"))
         briefing["executive_summary"] = self._compose_executive_summary(briefing)
         briefing["status"] = "ok"
 
@@ -224,27 +281,157 @@ class OrchestratorAgent(BaseAgent):
             Multi-line summary string
         """
         lines = [
-            f"📅 Daily Job Search Briefing — {datetime.utcnow().strftime('%d %b %Y')}",
-            f"👤 Candidate: {briefing['candidate']}",
+            f"Daily Job Search Briefing - {datetime.utcnow().strftime('%d %b %Y')}",
+            f"Candidate: {briefing['candidate']}",
             "",
-            f"🔍 Intel: {briefing['intel']['hidden_jobs_found']} hidden jobs found "
+            f"Intel: {briefing['intel']['hidden_jobs_found']} hidden jobs found "
             f"({briefing['intel']['hot_jobs_count']} HOT), "
             f"{briefing['intel']['funding_events']} funding events",
-            f"📤 Outreach: {briefing['outreach']['messages_drafted']} messages drafted, "
+            f"Outreach: {briefing['outreach']['messages_drafted']} messages drafted, "
             f"{briefing['outreach']['follow_ups_due']} follow-ups due",
-            f"📊 Pipeline: {briefing['tracker']['active_opportunities']} active opportunities",
+            f"Pipeline: {briefing['tracker']['active_opportunities']} active opportunities",
         ]
 
         if briefing["tracker"]["bottleneck"]:
-            lines.append(f"⚠️ Bottleneck: {briefing['tracker']['bottleneck']}")
+            lines.append(f"Bottleneck: {briefing['tracker']['bottleneck']}")
+
+        if briefing.get("escalations"):
+            lines.append(f"Escalations: {len(briefing['escalations'])}")
 
         actions = briefing["tracker"]["recommended_actions"]
         if actions:
             lines.append("")
-            lines.append("✅ Top Action:")
-            lines.append(f"   → {actions[0]}")
+            lines.append("Top Action:")
+            lines.append(f" - {actions[0]}")
 
         return "\n".join(lines)
+
+    def _run_stage(
+        self,
+        stage: OrchestrationStage,
+        action: Any,
+        max_attempts: int,
+    ) -> StageOutcome:
+        """Execute one stage with retries and normalize output to StageOutcome."""
+        started_at = datetime.utcnow()
+        attempts = 0
+        last_error: Optional[str] = None
+        normalized_data: Dict[str, Any] = {}
+
+        while attempts < max_attempts:
+            attempts += 1
+            try:
+                result = action()
+                if isinstance(result, dict):
+                    if result.get("status") in {"error", "failed"}:
+                        last_error = str(result.get("error", "Stage returned error status"))
+                        normalized_data = result
+                    else:
+                        normalized_data = result
+                        return StageOutcome(
+                            stage=stage,
+                            status="ok",
+                            started_at=started_at,
+                            completed_at=datetime.utcnow(),
+                            attempts=attempts,
+                            data=normalized_data,
+                        )
+                else:
+                    normalized_data = {"result": result}
+                    return StageOutcome(
+                        stage=stage,
+                        status="ok",
+                        started_at=started_at,
+                        completed_at=datetime.utcnow(),
+                        attempts=attempts,
+                        data=normalized_data,
+                    )
+            except Exception as exc:
+                last_error = str(exc)
+                self.logger.warning(
+                    f"Stage {stage.value} failed on attempt {attempts}/{max_attempts}: {exc}"
+                )
+
+        status = "skipped" if stage in {OrchestrationStage.TAILOR, OrchestrationStage.COACH} else "error"
+        return StageOutcome(
+            stage=stage,
+            status=status,
+            started_at=started_at,
+            completed_at=datetime.utcnow(),
+            attempts=attempts,
+            data=normalized_data,
+            error=last_error,
+        )
+
+    def _prioritize_jobs(self, hot_jobs: List[HiddenJob]) -> Dict[str, Any]:
+        """Sort and filter opportunities by the orchestrator policy."""
+        prioritized_jobs = sorted(
+            (job for job in hot_jobs if job.hot_score >= self.hot_score_threshold),
+            key=lambda job: job.hot_score,
+            reverse=True,
+        )
+        return {
+            "status": "ok",
+            "jobs": prioritized_jobs,
+            "selected_count": len(prioritized_jobs),
+            "threshold": self.hot_score_threshold,
+        }
+
+    def _run_profile_stage(
+        self,
+        cv_text: str,
+        hot_jobs: List[HiddenJob],
+        correlation_id: str,
+    ) -> Dict[str, Any]:
+        """Run CV tailoring when both CV and target opportunities are available."""
+        if not cv_text:
+            return {"status": "ok", "note": "No CV provided - profile analysis skipped"}
+        if not hot_jobs:
+            return {"status": "ok", "note": "No prioritized jobs - profile analysis skipped"}
+
+        top_job = hot_jobs[0]
+        result = self.profile.execute(
+            cv_text=cv_text,
+            job_description=top_job.description_snippet or "",
+            correlation_id=correlation_id,
+        )
+        analysis = result.get("analysis")
+        return {
+            "status": result.get("status", "ok"),
+            "ats_score": analysis.ats_score if hasattr(analysis, "ats_score") else "N/A",
+            "top_recommendations": (
+                analysis.recommendations[:3]
+                if hasattr(analysis, "recommendations")
+                else []
+            ),
+            "target_company": top_job.company_name,
+            "target_role": top_job.role_title,
+        }
+
+    def _run_coach_stage(self, correlation_id: str) -> Dict[str, Any]:
+        """Trigger interview coaching for the top interviewing pipeline entry."""
+        interviewing_entries = self.tracker.get_pipeline(
+            status=JobSearchStatus.INTERVIEWING,
+            limit=1,
+        )
+        if not interviewing_entries:
+            return {"status": "ok", "note": "No interviewing opportunities - coaching skipped"}
+
+        entry = interviewing_entries[0]
+        coach_result = self.coach.execute(
+            pipeline_entry=entry,
+            job_description=entry.notes or "",
+            correlation_id=correlation_id,
+        )
+        prep = coach_result.get("prep")
+        questions_count = len(prep.likely_questions) if hasattr(prep, "likely_questions") else 0
+        return {
+            "status": coach_result.get("status", "ok"),
+            "company_name": entry.company_name,
+            "role_title": entry.role_title,
+            "questions_prepared": questions_count,
+            "summary": coach_result.get("summary", ""),
+        }
 
     def _print_briefing(self, briefing: Dict[str, Any]) -> None:
         """Print the briefing to console using rich."""

@@ -22,7 +22,8 @@ from config.settings import settings
 from core.database import FundingEventORM, HiddenJobORM, get_db
 from core.logger import logger
 from core.models import FundingEvent, HiddenJob
-from tools.google_search_tool import GoogleSearchResult, GoogleSearchTool
+from tools.google_search_tool import GoogleSearchResult, GoogleSearchTool, QuotaExhaustedError
+from tools.job_board_tool import JobBoardTool
 from tools.llm_tool import LLMTool
 from tools.news_scraper_tool import NewsArticle, NewsScraperTool
 
@@ -33,11 +34,19 @@ from .base_agent import BaseAgent
 # Scoring weights — tune these based on signal quality
 # ---------------------------------------------------------------------------
 _SCORE_WEIGHTS = {
-    "funding_linked": 0.40,   # Company recently raised → high hiring probability
-    "role_keyword_match": 0.35,  # Job title matches target keywords
-    "recency": 0.15,          # Discovered within last 24 hours
-    "remote": 0.10,           # Remote position bonus
+    "funding_linked": 0.40,      # Company recently raised → high hiring probability
+    "role_keyword_match": 0.30,  # Job title matches target keywords
+    "direct_board_match": 0.20,  # Found via direct job board search (already role-filtered)
+    "recency": 0.10,             # Discovered within last 24 hours
+    "remote": 0.10,              # Remote position bonus
 }
+
+# Sources that use direct role-filtered search (every result is already relevant)
+_DIRECT_SEARCH_DOMAINS = frozenset({
+    "drushim.co.il", "alljobs.co.il", "gotfriends.co.il", "jobmaster.co.il",
+    "ice.co.il", "matrix-global.com", "comeet.co", "smartrecruiters.com",
+    "pinpointhq.com", "teamtailor.com",
+})
 
 
 class IntelAgent(BaseAgent):
@@ -58,6 +67,7 @@ class IntelAgent(BaseAgent):
         google_tool: Optional[GoogleSearchTool] = None,
         news_tool: Optional[NewsScraperTool] = None,
         llm_tool: Optional[LLMTool] = None,
+        job_board_tool: Optional[JobBoardTool] = None,
         target_roles: Optional[List[str]] = None,
         target_keywords: Optional[List[str]] = None,
     ) -> None:
@@ -65,6 +75,7 @@ class IntelAgent(BaseAgent):
 
         self._google = google_tool or GoogleSearchTool()
         self._news = news_tool or NewsScraperTool()
+        self._job_board = job_board_tool or JobBoardTool()
         self._llm = llm_tool or LLMTool(
             system_prompt=(
                 "You are an expert recruiter helping identify job opportunities "
@@ -148,23 +159,29 @@ class IntelAgent(BaseAgent):
         self.logger.info("Scanning funding news sources")
         articles: List[NewsArticle] = []
 
-        # Hebrew sources
+        # RSS-based news: FUNDING_PATTERNS inside the tool already filter articles.
+        # Pass empty keywords so we don't double-filter and lose valid matches.
         try:
             articles += self._news.search_funding_articles(
-                keywords=settings.funding_keywords_hebrew,
-                sources=["calcalist", "geektime"],
+                keywords=[],  # rely on built-in FUNDING_PATTERNS only
+                sources=settings.news_scraper_sources,
             )
         except Exception as exc:
-            self.logger.warning(f"News scrape failed (Hebrew sources): {exc}")
+            self.logger.warning(f"News scrape failed (RSS sources): {exc}")
 
-        # English sources via Google
-        try:
-            google_results = self._google.search_funding_news(
-                keywords=settings.funding_keywords_english, lang=""
-            )
-            articles += self._convert_google_to_articles(google_results)
-        except Exception as exc:
-            self.logger.warning(f"Google funding search failed: {exc}")
+        # Google Custom Search for funding news (skip if circuit-breaker already tripped)
+        if self._google._quota_exhausted:
+            self.logger.warning("Google quota exhausted — skipping Google funding search")
+        else:
+            try:
+                google_results = self._google.search_funding_news(
+                    keywords=settings.funding_keywords_english, lang=""
+                )
+                articles += self._convert_google_to_articles(google_results)
+            except QuotaExhaustedError:
+                self.logger.warning("Google quota exhausted during funding search — skipping")
+            except Exception as exc:
+                self.logger.warning(f"Google funding search failed: {exc}")
 
         events = [self._article_to_funding_event(a) for a in articles]
         self.logger.info(f"Funding scan: {len(events)} events discovered")
@@ -216,41 +233,72 @@ class IntelAgent(BaseAgent):
 
     def _search_hidden_job_boards(self) -> List[HiddenJob]:
         """
-        Use Google site: operator to find job postings on ATS platforms
-        that may not be indexed or visible through standard channels.
+        Search for job postings using two complementary strategies:
+        1. Direct scraping of Israeli job boards (always runs, no API needed)
+        2. Google Custom Search site: operator (runs only when API is available)
 
         Returns:
-            List of HiddenJob domain objects
+            Deduplicated list of HiddenJob domain objects
         """
         jobs: List[HiddenJob] = []
         seen_urls: set[str] = set()
 
-        for role in self._target_roles:
-            for domain in settings.job_board_domains:
-                self.logger.info(f"Searching '{role}' on {domain}")
-                try:
-                    results = self._google.search_jobs_on_domain(role=role, domain=domain)
-                except Exception as exc:
-                    self.logger.warning(f"Job search failed for {domain}: {exc}")
-                    continue
-
-                for result in results:
-                    if result.url in seen_urls:
-                        continue
-                    seen_urls.add(result.url)
-
-                    job = HiddenJob(
-                        company_name=self._extract_company_from_job(result),
-                        role_title=self._extract_role_title(result.title) or role,
-                        job_url=result.url,
-                        source_domain=domain,
-                        description_snippet=result.snippet,
-                        location=self._extract_location(result.snippet),
-                        remote=self._is_remote(result.snippet),
-                    )
+        # --- Strategy 1: Direct job board scraping (no API key required) ---
+        self.logger.info("Scanning Israeli job boards directly")
+        try:
+            direct_jobs = self._job_board.search_jobs(
+                roles=self._target_roles[:3],  # top 3 roles to stay fast
+            )
+            for job in direct_jobs:
+                if job.job_url not in seen_urls:
+                    seen_urls.add(job.job_url)
                     jobs.append(job)
+            self.logger.info(f"Direct job board scan: {len(direct_jobs)} jobs found")
+        except Exception as exc:
+            self.logger.warning(f"Direct job board scan failed: {exc}")
 
-        self.logger.info(f"Job board search: {len(jobs)} raw jobs discovered")
+        # --- Strategy 2: Google Custom Search (optional, API key required) ---
+        if self._google._quota_exhausted:
+            self.logger.warning("Google API unavailable — skipping Google job board scan")
+        else:
+            google_jobs_count = 0
+            quota_stopped = False
+            for role in self._target_roles:
+                if quota_stopped:
+                    break
+                for domain in settings.job_board_domains:
+                    if self._google._quota_exhausted:
+                        quota_stopped = True
+                        break
+                    self.logger.info(f"Google search: '{role}' on {domain}")
+                    try:
+                        results = self._google.search_jobs_on_domain(role=role, domain=domain)
+                    except QuotaExhaustedError:
+                        quota_stopped = True
+                        break
+                    except Exception as exc:
+                        self.logger.warning(f"Google job search failed for {domain}: {exc}")
+                        continue
+
+                    for result in results:
+                        if result.url in seen_urls:
+                            continue
+                        seen_urls.add(result.url)
+                        jobs.append(
+                            HiddenJob(
+                                company_name=self._extract_company_from_job(result),
+                                role_title=self._extract_role_title(result.title) or role,
+                                job_url=result.url,
+                                source_domain=domain,
+                                description_snippet=result.snippet,
+                                location=self._extract_location(result.snippet),
+                                remote=self._is_remote(result.snippet),
+                            )
+                        )
+                        google_jobs_count += 1
+            self.logger.info(f"Google job board scan: {google_jobs_count} additional jobs found")
+
+        self.logger.info(f"Job board search total: {len(jobs)} raw jobs discovered")
         return jobs
 
     def _extract_company_from_job(self, result: GoogleSearchResult) -> str:
@@ -313,13 +361,17 @@ class IntelAgent(BaseAgent):
         for job in jobs:
             score = 0.0
 
-            # Signal 1: Company recently raised funding
+            # Signal 1: Company recently raised funding (strongest hiring predictor)
             is_funded = job.company_name.lower() in funded_company_names
             if is_funded:
                 score += _SCORE_WEIGHTS["funding_linked"]
                 job.funding_linked = True
 
-            # Signal 2: Role keyword match
+            # Signal 2: Direct job board search match (already role-filtered at source)
+            if job.source_domain in _DIRECT_SEARCH_DOMAINS:
+                score += _SCORE_WEIGHTS["direct_board_match"]
+
+            # Signal 3: Role keyword match (title contains target keyword)
             title_lower = job.role_title.lower()
             keyword_hits = sum(
                 1 for kw in self._target_keywords if kw.lower() in title_lower
@@ -328,10 +380,10 @@ class IntelAgent(BaseAgent):
                 ratio = min(keyword_hits / max(len(self._target_keywords), 1), 1.0)
                 score += _SCORE_WEIGHTS["role_keyword_match"] * ratio
 
-            # Signal 3: Recency (always fresh in a single run)
+            # Signal 4: Recency (always fresh in a single run)
             score += _SCORE_WEIGHTS["recency"]
 
-            # Signal 4: Remote bonus
+            # Signal 5: Remote bonus
             if job.remote:
                 score += _SCORE_WEIGHTS["remote"]
 

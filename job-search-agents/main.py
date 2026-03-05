@@ -17,6 +17,7 @@ from core.database import init_db
 from core.logger import logger
 from agents.orchestrator_agent import OrchestratorAgent
 from agents.intel_agent import IntelAgent
+from orchestration.scheduler_service import start_scheduler
 
 
 def parse_args() -> argparse.Namespace:
@@ -36,12 +37,57 @@ def parse_args() -> argparse.Namespace:
         "--intel-only", action="store_true",
         help="Run Intel Agent only (funding scan + hidden jobs)",
     )
+    parser.add_argument(
+        "--scheduler", action="store_true",
+        help="Run APScheduler service for daily/weekly automation",
+    )
+    parser.add_argument(
+        "--show-jobs", action="store_true",
+        help="Print all discovered jobs from the database",
+    )
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
     init_db()
+
+    if args.scheduler:
+        logger.info("Starting scheduler mode")
+        start_scheduler()
+        return 0
+
+    if args.show_jobs:
+        from rich.console import Console
+        from rich.table import Table
+        from rich import box
+        from core.database import HiddenJobORM, get_db
+        with get_db() as db:
+            rows = db.query(HiddenJobORM).order_by(
+                HiddenJobORM.hot_score.desc(),
+                HiddenJobORM.discovered_at.desc()
+            ).limit(50).all()
+        console = Console()
+        table = Table(title=f"Discovered Jobs ({len(rows)} shown)", box=box.ROUNDED)
+        table.add_column("#", style="dim", width=3)
+        table.add_column("Score", style="yellow", width=6)
+        table.add_column("Role", style="cyan", width=32)
+        table.add_column("Company", style="green", width=22)
+        table.add_column("Source", style="dim", width=16)
+        table.add_column("Funded", style="red", width=6)
+        table.add_column("URL", style="blue", width=55)
+        for i, row in enumerate(rows, 1):
+            table.add_row(
+                str(i),
+                f"{row.hot_score:.2f}" if row.hot_score else "0.00",
+                row.role_title[:32] if row.role_title else "",
+                row.company_name[:22] if row.company_name else "",
+                row.source_domain[:16] if row.source_domain else "",
+                "YES" if row.funding_linked else "no",
+                row.job_url[:55] if row.job_url else "",
+            )
+        console.print(table)
+        return 0
 
     if args.intel_only:
         logger.info("Running Intel Agent only")
@@ -73,4 +119,8 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        print("\nScan interrupted by user (Ctrl+C). Partial results may have been saved.")
+        sys.exit(130)

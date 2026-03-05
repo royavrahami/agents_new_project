@@ -136,31 +136,52 @@ class Settings(BaseSettings):
             "greenhouse.io",
             "smartrecruiters.com",
             "workable.com",
+            "drushim.co.il",
+            "alljobs.co.il",
+            "gotfriends.co.il",
+            "jobmaster.co.il",
+            "ice.co.il",
         ]
     )
-    funding_keywords_hebrew: List[str] = Field(
-        default_factory=lambda: [
-            "גייסה הון",
-            "השלימה גיוס",
-            "גיוס הון",
-            "השקעה",
-            "מימון",
-        ]
-    )
+    # Primary funding keywords used for all news scraping and Google search (English only)
     funding_keywords_english: List[str] = Field(
         default_factory=lambda: [
             "raised funding",
-            "series A",
-            "series B",
+            "series A funding",
+            "series B funding",
             "seed round",
-            "closed round",
+            "closed funding round",
             "investment round",
+            "venture capital",
+            "startup funding Israel",
+        ]
+    )
+    # RSS feed source names used by the NewsScraperTool (must match keys in RSS_SOURCES)
+    news_scraper_sources: List[str] = Field(
+        default_factory=lambda: [
+            "techcrunch_vc",
+            "techcrunch_startups",
+            "venturebeat",
+            "crunchbase_news",
         ]
     )
 
     # --- Outreach Agent ---
     outreach_daily_limit: int = Field(default=15, ge=1, le=50)
     follow_up_days: int = Field(default=5, ge=1)
+    # Lower threshold for direct job board results (already role-filtered at search time)
+    hot_job_threshold: float = Field(default=0.2, ge=0.0, le=1.0)
+    # Escalation = funding-linked opportunity (strong hiring signal)
+    escalation_hot_score: float = Field(default=0.7, ge=0.0, le=1.0)
+
+    # --- Scheduler ---
+    scheduler_enabled: bool = Field(default=False)
+    scheduler_timezone: str = Field(default="Asia/Jerusalem")
+    scheduler_daily_hour: int = Field(default=8, ge=0, le=23)
+    scheduler_daily_minute: int = Field(default=0, ge=0, le=59)
+    scheduler_weekly_day: str = Field(default="fri")
+    scheduler_weekly_hour: int = Field(default=9, ge=0, le=23)
+    scheduler_weekly_minute: int = Field(default=0, ge=0, le=59)
 
     # --- Logging ---
     log_level: LogLevel = Field(default=LogLevel.INFO)

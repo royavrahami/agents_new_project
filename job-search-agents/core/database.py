@@ -19,6 +19,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    UniqueConstraint,
     create_engine,
 )
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
@@ -122,6 +123,24 @@ class OutreachMessageORM(Base):
     responded_at = Column(DateTime)
     follow_up_due = Column(DateTime)
     status = Column(String, default="DRAFT")
+
+
+class OrchestratorRunORM(Base):
+    """Execution log for orchestrator runs used for idempotency and observability."""
+
+    __tablename__ = "orchestrator_runs"
+    __table_args__ = (
+        UniqueConstraint("run_key", name="uq_orchestrator_runs_run_key"),
+    )
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid4()))
+    run_key = Column(String, nullable=False, index=True)
+    cycle_type = Column(String, nullable=False, default="daily")
+    correlation_id = Column(String, nullable=False, index=True)
+    status = Column(String, nullable=False, default="running")
+    details = Column(Text)
+    started_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    completed_at = Column(DateTime)
 
 
 # ---------------------------------------------------------------------------

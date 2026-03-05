@@ -6,7 +6,8 @@ These are the core data contracts — every agent reads and writes these types.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import List, Optional
+from enum import Enum
+from typing import Dict, List, Optional
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field, HttpUrl
@@ -179,6 +180,33 @@ class WeeklyReport(BaseModel):
     bottleneck: Optional[str] = None
     recommended_actions: List[str] = Field(default_factory=list)
     generated_at: datetime = Field(default_factory=datetime.utcnow)
+
+    class Config:
+        json_encoders = {datetime: lambda v: v.isoformat()}
+
+
+class OrchestrationStage(str, Enum):
+    """Lifecycle stages for a single orchestrator cycle."""
+
+    DISCOVER = "discover"
+    PRIORITIZE = "prioritize"
+    TAILOR = "tailor"
+    OUTREACH = "outreach"
+    TRACK = "track"
+    COACH = "coach"
+    SUMMARIZE = "summarize"
+
+
+class StageOutcome(BaseModel):
+    """Structured output contract for one orchestration stage."""
+
+    stage: OrchestrationStage
+    status: str = Field(default="ok")
+    started_at: datetime = Field(default_factory=datetime.utcnow)
+    completed_at: Optional[datetime] = None
+    attempts: int = 1
+    data: Dict[str, object] = Field(default_factory=dict)
+    error: Optional[str] = None
 
     class Config:
         json_encoders = {datetime: lambda v: v.isoformat()}

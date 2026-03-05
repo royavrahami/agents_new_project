@@ -58,6 +58,18 @@ class BaseAgent(ABC):
         Public entry point. Wraps `run()` with lifecycle hooks and top-level error handling.
         Orchestrator calls `execute()`, not `run()` directly.
         """
+        correlation_id = kwargs.pop("correlation_id", None)
+        if correlation_id:
+            with self.logger.contextualize(correlation_id=correlation_id):
+                self._before_run()
+                try:
+                    result = self.run(**kwargs)
+                except Exception as exc:
+                    self.logger.exception(f"[{self.name}] Unhandled error during run: {exc}")
+                    result = {"status": "error", "error": str(exc), "data": None}
+                self._after_run(result)
+                return result
+
         self._before_run()
         try:
             result = self.run(**kwargs)

@@ -1,15 +1,17 @@
 """
 Tests for IntelAgent — funding scanner and hidden job discovery.
-Covers: happy path, empty results, scoring logic, deduplication, persistence.
+Covers: happy path, empty results, scoring logic, deduplication, persistence,
+and circuit-breaker early exit.
 """
 
 import pytest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, patch, PropertyMock
 from uuid import uuid4
 
 from agents.intel_agent import IntelAgent, _SCORE_WEIGHTS
 from core.models import FundingEvent, HiddenJob
-from tools.google_search_tool import GoogleSearchResult
+from tools.google_search_tool import GoogleSearchResult, QuotaExhaustedError
+from tools.job_board_tool import JobBoardTool
 from tools.news_scraper_tool import NewsArticle
 
 
@@ -128,8 +130,15 @@ class TestIntelAgentExtractors:
 class TestIntelAgentRun:
     """Integration-level tests for IntelAgent.run() with mocked tools."""
 
+    def _make_job_board_mock(self, jobs=None) -> MagicMock:
+        """Return a mocked JobBoardTool that returns controlled results."""
+        mock_jb = MagicMock(spec=JobBoardTool)
+        mock_jb.search_jobs.return_value = jobs or []
+        return mock_jb
+
     def _make_agent_with_results(self, mock_llm) -> IntelAgent:
         google = MagicMock()
+        google._quota_exhausted = False
         google.search_jobs_on_domain.return_value = [
             GoogleSearchResult(
                 title="QA Automation Engineer at Acme Corp",
@@ -154,6 +163,7 @@ class TestIntelAgentRun:
         return IntelAgent(
             google_tool=google,
             news_tool=news,
+            job_board_tool=self._make_job_board_mock(),
             llm_tool=mock_llm,
             target_roles=["QA Automation Engineer"],
             target_keywords=["QA", "Automation", "Python"],
@@ -176,12 +186,20 @@ class TestIntelAgentRun:
 
     def test_run_with_no_results(self, mock_llm):
         google = MagicMock()
+        google._quota_exhausted = False
         google.search_jobs_on_domain.return_value = []
         google.search_funding_news.return_value = []
         news = MagicMock()
         news.search_funding_articles.return_value = []
+        job_board = MagicMock(spec=JobBoardTool)
+        job_board.search_jobs.return_value = []
 
-        agent = IntelAgent(google_tool=google, news_tool=news, llm_tool=mock_llm)
+        agent = IntelAgent(
+            google_tool=google,
+            news_tool=news,
+            job_board_tool=job_board,
+            llm_tool=mock_llm,
+        )
         result = agent.execute()
         assert result["status"] == "ok"
         assert result["hidden_jobs"] == 0
@@ -189,18 +207,27 @@ class TestIntelAgentRun:
 
     def test_run_handles_tool_exception_gracefully(self, mock_llm):
         google = MagicMock()
+        google._quota_exhausted = False
         google.search_jobs_on_domain.side_effect = Exception("Network error")
         google.search_funding_news.return_value = []
         news = MagicMock()
         news.search_funding_articles.return_value = []
+        job_board = MagicMock(spec=JobBoardTool)
+        job_board.search_jobs.return_value = []
 
-        agent = IntelAgent(google_tool=google, news_tool=news, llm_tool=mock_llm)
+        agent = IntelAgent(
+            google_tool=google,
+            news_tool=news,
+            job_board_tool=job_board,
+            llm_tool=mock_llm,
+        )
         # Should not raise — BaseAgent.execute() catches all exceptions
         result = agent.execute()
         assert result["status"] in ("ok", "error")
 
     def test_deduplication_prevents_duplicate_jobs(self, mock_llm):
         google = MagicMock()
+        google._quota_exhausted = False
         # Return same URL twice (simulating two domains returning same job)
         same_result = GoogleSearchResult(
             title="QA Engineer at Acme",
@@ -211,10 +238,13 @@ class TestIntelAgentRun:
         google.search_funding_news.return_value = []
         news = MagicMock()
         news.search_funding_articles.return_value = []
+        job_board = MagicMock(spec=JobBoardTool)
+        job_board.search_jobs.return_value = []
 
         agent = IntelAgent(
             google_tool=google,
             news_tool=news,
+            job_board_tool=job_board,
             llm_tool=mock_llm,
             target_roles=["QA Engineer"],
         )
@@ -222,3 +252,100 @@ class TestIntelAgentRun:
         # Second execute should not double-count (URL deduplication in _search_hidden_job_boards)
         result = agent.execute()
         assert result["status"] == "ok"
+
+
+class TestIntelAgentQuotaExhausted:
+    """Tests for graceful degradation when Google API quota is exhausted."""
+
+    def test_job_board_scan_stops_early_on_quota_error(self, mock_llm):
+        """After a QuotaExhaustedError Google scan stops; direct job board still runs."""
+        google = MagicMock()
+        google._quota_exhausted = False
+        call_count = 0
+
+        def side_effect_with_quota(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            google._quota_exhausted = True
+            raise QuotaExhaustedError("Quota exceeded")
+
+        google.search_jobs_on_domain.side_effect = side_effect_with_quota
+        google.search_funding_news.return_value = []
+        news = MagicMock()
+        news.search_funding_articles.return_value = []
+        job_board = MagicMock(spec=JobBoardTool)
+        job_board.search_jobs.return_value = []  # no direct results either
+
+        agent = IntelAgent(
+            google_tool=google,
+            news_tool=news,
+            job_board_tool=job_board,
+            llm_tool=mock_llm,
+            target_roles=["QA Engineer", "QA Manager"],
+        )
+        result = agent.execute()
+        assert result["status"] == "ok"
+        assert result["hidden_jobs"] == 0
+        # Only the first Google call before circuit-breaker; direct board always runs
+        assert call_count == 1
+        job_board.search_jobs.assert_called_once()
+
+    def test_funding_scan_skips_google_when_quota_exhausted(self, mock_llm):
+        """If _quota_exhausted is already True, the English funding search is skipped."""
+        google = MagicMock()
+        google._quota_exhausted = True
+        google.search_jobs_on_domain.return_value = []
+        news = MagicMock()
+        news.search_funding_articles.return_value = []
+        job_board = MagicMock(spec=JobBoardTool)
+        job_board.search_jobs.return_value = []
+
+        agent = IntelAgent(
+            google_tool=google,
+            news_tool=news,
+            job_board_tool=job_board,
+            llm_tool=mock_llm,
+        )
+        result = agent.execute()
+        assert result["status"] == "ok"
+        google.search_funding_news.assert_not_called()
+
+    def test_full_run_completes_with_partial_results(self, mock_llm):
+        """Even with quota errors, the agent returns ok status and whatever it found."""
+        google = MagicMock()
+        google._quota_exhausted = False
+        first_call = True
+
+        def first_succeeds_then_quota(*args, **kwargs):
+            nonlocal first_call
+            if first_call:
+                first_call = False
+                return [
+                    GoogleSearchResult(
+                        title="QA at StartupX",
+                        url="https://comeet.com/jobs/startupx/qa",
+                        snippet="QA role in Tel Aviv",
+                    )
+                ]
+            google._quota_exhausted = True
+            raise QuotaExhaustedError("Quota exceeded")
+
+        google.search_jobs_on_domain.side_effect = first_succeeds_then_quota
+        google.search_funding_news.return_value = []
+        news = MagicMock()
+        news.search_funding_articles.return_value = []
+        mock_llm.extract_company_name.return_value = "StartupX"
+        job_board = MagicMock(spec=JobBoardTool)
+        job_board.search_jobs.return_value = []
+
+        agent = IntelAgent(
+            google_tool=google,
+            news_tool=news,
+            job_board_tool=job_board,
+            llm_tool=mock_llm,
+            target_roles=["QA Engineer"],
+            target_keywords=["QA"],
+        )
+        result = agent.execute()
+        assert result["status"] == "ok"
+        assert result["hidden_jobs"] >= 1

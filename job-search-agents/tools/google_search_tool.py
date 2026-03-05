@@ -3,6 +3,10 @@ Google Custom Search Tool.
 Wraps the Google Custom Search JSON API for structured web queries.
 Falls back to a simple requests-based scrape when no API key is configured (dev mode).
 
+Implements a circuit-breaker: once a 429 (quota exhausted) or 400 (key expired)
+response is received, all subsequent calls return [] immediately without making
+HTTP requests.
+
 Docs: https://developers.google.com/custom-search/v1/overview
 """
 
@@ -13,7 +17,7 @@ from typing import List, Optional
 from urllib.parse import quote_plus
 
 import httpx
-from tenacity import retry, stop_after_attempt, wait_exponential
+from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 from config.settings import settings
 from core.logger import logger
@@ -21,6 +25,21 @@ from core.models import HiddenJob
 
 
 GOOGLE_CSE_ENDPOINT = "https://www.googleapis.com/customsearch/v1"
+
+_NON_RETRYABLE_STATUS_CODES = frozenset({400, 401, 403, 429})
+
+
+def _is_retryable(exc: BaseException) -> bool:
+    """Only retry on transient server errors (5xx) or network timeouts."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code >= 500
+    if isinstance(exc, (httpx.TimeoutException, httpx.ConnectError)):
+        return True
+    return False
+
+
+class QuotaExhaustedError(Exception):
+    """Raised when the Google API quota is exhausted or the key is invalid."""
 
 
 class GoogleSearchResult:
@@ -37,7 +56,11 @@ class GoogleSearchResult:
 
 class GoogleSearchTool:
     """
-    Thin wrapper around Google Custom Search API.
+    Thin wrapper around Google Custom Search API with circuit-breaker.
+
+    After receiving a 429 (quota) or 400 (key expired) response the tool
+    sets ``_quota_exhausted = True`` and every subsequent ``search()`` call
+    returns ``[]`` instantly without any HTTP traffic.
 
     Args:
         api_key: Google API key (defaults to settings.google_api_key)
@@ -58,8 +81,18 @@ class GoogleSearchTool:
         self.max_results = max_results
         self.rate_limit_delay = rate_limit_delay
         self._client = httpx.Client(timeout=15.0)
+        self._quota_exhausted: bool = False
 
+<<<<<<< Updated upstream
     @retry(stop=stop_after_attempt(1))
+=======
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=10),
+        retry=retry_if_exception(_is_retryable),
+        reraise=True,
+    )
+>>>>>>> Stashed changes
     def search(self, query: str, language: str = "lang_he") -> List[GoogleSearchResult]:
         """
         Execute a Google Custom Search query.
@@ -72,8 +105,13 @@ class GoogleSearchTool:
             List of GoogleSearchResult objects (up to max_results)
 
         Raises:
-            httpx.HTTPStatusError: If the API returns a non-2xx status
+            QuotaExhaustedError: On 429 / 400 (circuit-breaker tripped)
+            httpx.HTTPStatusError: On other non-2xx responses (after retries)
         """
+        if self._quota_exhausted:
+            logger.debug("Google quota circuit-breaker open — skipping query")
+            return []
+
         if not self.api_key or not self.cse_id:
             logger.warning(
                 "Google API key or CSE ID not configured — returning empty results. "
@@ -91,6 +129,18 @@ class GoogleSearchTool:
 
         logger.debug(f"Google search query: {query!r}")
         response = self._client.get(GOOGLE_CSE_ENDPOINT, params=params)
+
+        if response.status_code in _NON_RETRYABLE_STATUS_CODES:
+            self._quota_exhausted = True
+            logger.error(
+                f"Google API error (circuit-breaker tripped) | "
+                f"status={response.status_code} | query={query!r} | "
+                f"response={response.text[:300]}"
+            )
+            raise QuotaExhaustedError(
+                f"Google API returned {response.status_code} — "
+                "circuit-breaker activated, all further queries will be skipped"
+            )
 
         if response.status_code != 200:
             logger.error(
@@ -147,7 +197,7 @@ class GoogleSearchTool:
         Returns:
             List of GoogleSearchResult for funding news
         """
-        terms = keywords or settings.funding_keywords_hebrew
+        terms = keywords or settings.funding_keywords_english
         query = " OR ".join(f'"{kw}"' for kw in terms)
         return self.search(query, language=lang)
 
