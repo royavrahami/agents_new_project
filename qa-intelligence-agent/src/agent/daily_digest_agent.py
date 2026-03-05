@@ -97,7 +97,10 @@ class DailyDigestAgent:
         init_db()
         self._lookback_hours = lookback_hours
         self._min_score = min_score
-        self._extractor = KeywordExtractor(use_llm=bool(settings.openai_api_key))
+        # Disable LLM for keyword extraction in digest – too slow for batch of 100s of articles.
+        # Articles with AI summaries already have key_insights; statistical extraction
+        # handles the rest instantly without extra API calls.
+        self._extractor = KeywordExtractor(use_llm=False)
 
     def run(self) -> Optional[Path]:
         """
