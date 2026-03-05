@@ -38,6 +38,155 @@ class Notifier:
       - Slack: requires slack_bot_token, slack_channel
     """
 
+    def send_digest(
+        self,
+        digest_articles: list,
+        stats,
+        alert_trends: list[Trend],
+        report_path: Optional[Path] = None,
+    ) -> None:
+        """
+        Send the daily digest report via all configured channels.
+
+        Args:
+            digest_articles: List of DigestArticle objects.
+            stats:           DigestStats summary object.
+            alert_trends:    Alert-level trends.
+            report_path:     Path to the generated HTML digest file.
+        """
+        self._console_digest_output(stats, alert_trends, report_path)
+
+        if settings.smtp_user and settings.smtp_password and settings.notify_email:
+            self._send_digest_email(digest_articles, stats, alert_trends, report_path)
+        else:
+            logger.info("Email not configured – digest email skipped")
+
+    def _console_digest_output(self, stats, alert_trends, report_path) -> None:
+        """Print digest summary to terminal."""
+        from rich.table import Table
+        table = Table(title=f"📋 Daily Digest – {stats.date_str}", box=box.ROUNDED,
+                      header_style="bold white on #0f3460")
+        table.add_column("Metric"); table.add_column("Value", justify="right", style="bold")
+        table.add_row("Articles collected", str(stats.total_articles))
+        table.add_row("Average score", str(stats.avg_relevance))
+        table.add_row("Alert trends", str(stats.alert_count))
+        table.add_row("Categories", str(len(stats.category_counts)))
+        console.print(table)
+        if report_path:
+            console.print(Panel(f"[bold blue]Digest saved:[/bold blue] {report_path}",
+                                border_style="blue"))
+
+    def _send_digest_email(self, digest_articles, stats, alert_trends, report_path) -> None:
+        """Send the full digest as an HTML email with report attached."""
+        now = datetime.now(timezone.utc)
+        date_str = now.strftime("%d %b %Y")
+        subject = f"📋 [{date_str}] QA Daily Digest – {stats.total_articles} articles | {stats.alert_count} alerts"
+
+        report_html = ""
+        report_filename = ""
+        if report_path and report_path.exists():
+            report_html = report_path.read_text(encoding="utf-8")
+            report_filename = report_path.name
+
+        # Build compact summary table for email body
+        table_rows = ""
+        for i, a in enumerate(digest_articles[:50], 1):
+            kws = ", ".join(a.keywords[:3])
+            score_color = "#059669" if a.relevance_score >= 70 else "#d97706" if a.relevance_score >= 50 else "#9ca3af"
+            table_rows += f"""
+            <tr style="border-bottom:1px solid #f3f4f6;">
+              <td style="padding:8px 10px;color:#9ca3af;font-size:0.82em;">{i}</td>
+              <td style="padding:8px 10px;">
+                <a href="{a.url}" style="color:#0f3460;font-weight:600;text-decoration:none;font-size:0.88em;">{a.title[:65]}</a>
+              </td>
+              <td style="padding:8px 10px;font-size:0.78em;color:#6b7280;">{a.category}</td>
+              <td style="padding:8px 10px;font-size:0.78em;color:#374151;">{kws}</td>
+              <td style="padding:8px 10px;font-size:0.76em;color:#9ca3af;white-space:nowrap;">{a.published_date}</td>
+              <td style="padding:8px 10px;font-size:0.76em;color:#9ca3af;white-space:nowrap;">{a.collected_date}</td>
+              <td style="padding:8px 10px;text-align:center;font-weight:700;color:{score_color};font-size:0.88em;">{a.relevance_score}</td>
+            </tr>"""
+
+        alert_block = ""
+        if alert_trends:
+            items = "".join(
+                f"<li style='margin:6px 0;'><strong style='color:#e94560;'>{t.name}</strong> "
+                f"<span style='color:#6b7280;font-size:0.85em;'>({t.category}) momentum: {t.momentum_score:.1f}</span></li>"
+                for t in alert_trends
+            )
+            alert_block = f"""
+            <div style="background:#fff8f8;border-left:4px solid #e94560;border-radius:6px;padding:14px 18px;margin:20px 0;">
+              <strong style="color:#e94560;">🚨 Alert Trends</strong>
+              <ul style="margin:8px 0 0 16px;">{items}</ul>
+            </div>"""
+
+        kw_str = " ".join(
+            f'<span style="background:#ede9fe;color:#5b21b6;border-radius:9px;padding:2px 8px;margin:2px;font-size:0.8em;">{kw}</span>'
+            for kw, _ in stats.top_keywords[:15]
+        )
+
+        email_body = f"""<!DOCTYPE html><html><head><meta charset="UTF-8"></head>
+<body style="font-family:system-ui,sans-serif;background:#f5f7fa;margin:0;padding:0;">
+  <div style="background:linear-gradient(135deg,#0f3460 0%,#1a237e 100%);color:white;padding:28px 32px;">
+    <h1 style="margin:0;font-size:1.5rem;">📋 Daily Digest – {date_str}</h1>
+    <p style="margin:6px 0 0;opacity:0.75;font-size:0.88rem;">
+      {stats.total_articles} articles &nbsp;|&nbsp; avg score: {stats.avg_relevance} &nbsp;|&nbsp; {stats.alert_count} alerts
+    </p>
+  </div>
+  <div style="max-width:960px;margin:0 auto;padding:24px 20px;">
+    {alert_block}
+    <div style="margin:20px 0;">
+      <strong style="color:#0f3460;">🔤 Top Keywords:</strong><br><br>{kw_str}
+    </div>
+    <h2 style="color:#0f3460;border-bottom:3px solid #e94560;padding-bottom:8px;">📊 Article Summary Table</h2>
+    <div style="overflow-x:auto;border-radius:10px;box-shadow:0 1px 4px rgba(0,0,0,0.08);">
+      <table style="width:100%;border-collapse:collapse;background:white;">
+        <thead>
+          <tr style="background:#0f3460;color:white;">
+            <th style="padding:10px;font-size:0.78em;">#</th>
+            <th style="padding:10px;text-align:left;font-size:0.78em;">Title</th>
+            <th style="padding:10px;text-align:left;font-size:0.78em;">Category</th>
+            <th style="padding:10px;text-align:left;font-size:0.78em;">Keywords</th>
+            <th style="padding:10px;font-size:0.78em;">Published</th>
+            <th style="padding:10px;font-size:0.78em;">Collected</th>
+            <th style="padding:10px;font-size:0.78em;">Score</th>
+          </tr>
+        </thead>
+        <tbody>{table_rows}</tbody>
+      </table>
+    </div>
+    <p style="margin-top:16px;color:#9ca3af;font-size:0.8em;">
+      📎 Full interactive report attached as HTML file.
+    </p>
+  </div>
+  <div style="text-align:center;padding:16px;color:#9ca3af;font-size:0.75em;border-top:1px solid #e5e7eb;">
+    QA Intelligence Agent – Daily Digest – {date_str}
+  </div>
+</body></html>"""
+
+        msg = MIMEMultipart("mixed")
+        msg["Subject"] = subject
+        msg["From"] = f"QA Intelligence Agent <{settings.smtp_user}>"
+        msg["To"] = settings.notify_email
+        msg.attach(MIMEText(email_body, "html", "utf-8"))
+
+        if report_html and report_filename:
+            attachment = MIMEBase("text", "html")
+            attachment.set_payload(report_html.encode("utf-8"))
+            encoders.encode_base64(attachment)
+            attachment.add_header("Content-Disposition", "attachment", filename=report_filename)
+            msg.attach(attachment)
+
+        try:
+            with smtplib.SMTP(settings.smtp_host, settings.smtp_port) as server:
+                server.ehlo(); server.starttls()
+                server.login(settings.smtp_user, settings.smtp_password)
+                server.sendmail(settings.smtp_user, settings.notify_email, msg.as_string())
+            logger.info("Daily digest email sent to %s", settings.notify_email)
+        except smtplib.SMTPAuthenticationError:
+            logger.error("Email auth failed. Use Gmail App Password: https://myaccount.google.com/apppasswords")
+        except Exception as exc:
+            logger.error("Failed to send digest email: %s", exc)
+
     def send(
         self,
         alert_trends: list[Trend],
