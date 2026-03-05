@@ -8,7 +8,7 @@ name: QA Intelligence Agent
 
 on:
   schedule:
-    - cron: "0 6,12,18,0 * * *"   # Collection agent: 4× daily
+    - cron: "0 6,18 * * *"          # Collection agent: 2× daily (06:00 + 18:00 UTC)
     - cron: "0 22 * * *"           # Daily digest agent: every day at 22:00 UTC (midnight Israel)
   workflow_dispatch:
     inputs:
