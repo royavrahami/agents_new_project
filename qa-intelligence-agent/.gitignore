@@ -6,8 +6,11 @@ data/
 *.db
 *.sqlite
 
-# Generated reports
+# Generated reports (output files, not source)
 reports/
+# But keep source templates
+!src/reports/
+!src/reports/**
 
 # Logs
 logs/

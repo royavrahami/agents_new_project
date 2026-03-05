@@ -8,9 +8,14 @@ name: QA Intelligence Agent
 
 on:
   schedule:
-    - cron: "0 6,12,18,0 * * *"   # 4× daily
+    - cron: "0 6,12,18,0 * * *"   # Collection agent: 4× daily
+    - cron: "0 22 * * *"           # Daily digest agent: every day at 22:00 UTC (midnight Israel)
   workflow_dispatch:
     inputs:
+      job_type:
+        description: "Which job to run: 'collect' or 'digest'"
+        required: false
+        default: "collect"
       min_relevance_score:
         description: "Minimum relevance score (0–100)"
         required: false
@@ -29,9 +34,14 @@ concurrency:
   cancel-in-progress: false   # never cancel – let the run finish
 
 jobs:
+  # ── Job 1: Collection Agent (4× daily) ──────────────────────────────────────
   run-agent:
     name: Run QA Intelligence Agent
     runs-on: ubuntu-latest
+    # Skip this job when the daily digest cron fires or user requests digest
+    if: |
+      github.event_name == 'workflow_dispatch' && github.event.inputs.job_type != 'digest' ||
+      github.event_name == 'schedule' && github.event.schedule != '0 22 * * *'
 
     defaults:
       run:
@@ -142,5 +152,98 @@ jobs:
           else
             TIMESTAMP=$(date -u +"%d %b %Y %H:%M UTC")
             git commit -m "report(auto): QA Intelligence Report – $TIMESTAMP [skip ci]"
+            git push origin HEAD:main
+          fi
+
+  # ── Job 2: Daily Digest Agent (22:00 UTC every day) ─────────────────────────
+  daily-digest:
+    name: Daily Digest – End of Day Summary
+    runs-on: ubuntu-latest
+    if: |
+      github.event_name == 'workflow_dispatch' && github.event.inputs.job_type == 'digest' ||
+      github.event_name == 'schedule' && github.event.schedule == '0 22 * * *'
+
+    defaults:
+      run:
+        working-directory: qa-intelligence-agent
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: qa-intelligence-agent/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt --quiet
+
+      - name: Restore database from latest collection run
+        uses: dawidd6/action-download-artifact@v6
+        with:
+          name: qa-agent-database
+          path: qa-intelligence-agent/data/
+          workflow_conclusion: success
+          if_no_artifact_found: ignore
+        continue-on-error: true
+
+      - name: Create .env configuration
+        run: |
+          cat > .env << 'ENVEOF'
+          OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}
+          OPENAI_MODEL=gpt-4o
+          OPENAI_MAX_TOKENS=2000
+          DATABASE_URL=sqlite:///./data/qa_agent.db
+          MIN_RELEVANCE_SCORE=30
+          REPORTS_DIR=./reports
+          LOG_LEVEL=INFO
+          LOG_DIR=./logs
+          SMTP_HOST=smtp.gmail.com
+          SMTP_PORT=587
+          SMTP_USER=${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD=${{ secrets.SMTP_PASSWORD }}
+          NOTIFY_EMAIL=${{ secrets.NOTIFY_EMAIL }}
+          ENVEOF
+
+      - name: Create required directories
+        run: mkdir -p data reports logs
+
+      - name: Run Daily Digest Agent
+        run: PYTHONPATH=. python3 main.py digest --hours 24 --min-score 30
+        env:
+          PYTHONUNBUFFERED: "1"
+
+      - name: Upload daily digest artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: daily-digest-${{ github.run_number }}
+          path: qa-intelligence-agent/reports/daily_digest_*.html
+          retention-days: 60
+
+      - name: Commit daily digest to repository
+        if: success()
+        run: |
+          DIGEST=$(ls -t reports/daily_digest_*.html 2>/dev/null | head -1)
+          if [ -z "$DIGEST" ]; then
+            echo "No digest generated – skipping commit"
+            exit 0
+          fi
+
+          git config user.name  "QA Intelligence Agent"
+          git config user.email "qa-agent@github-actions"
+
+          git add "$DIGEST" "${DIGEST%.html}.md" 2>/dev/null || true
+
+          if git diff --cached --quiet; then
+            echo "Already committed – skipping"
+          else
+            DATE=$(date -u +"%d %b %Y")
+            git commit -m "digest(auto): Daily Digest – $DATE [skip ci]"
             git push origin HEAD:main
           fi

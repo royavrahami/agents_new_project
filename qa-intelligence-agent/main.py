@@ -139,6 +139,23 @@ def cmd_status(_args: argparse.Namespace) -> None:
     console.print(table)
 
 
+def cmd_digest(args: argparse.Namespace) -> None:
+    """Run the end-of-day Daily Digest Agent."""
+    from src.agent.daily_digest_agent import DailyDigestAgent
+
+    hours = getattr(args, "hours", 24)
+    min_score = getattr(args, "min_score", 30)
+    console.print(f"[bold blue]Running Daily Digest Agent (last {hours}h, min score {min_score})...[/bold blue]")
+
+    agent = DailyDigestAgent(lookback_hours=hours, min_score=min_score)
+    report_path = agent.run()
+
+    if report_path:
+        console.print(f"\n[bold green]✓ Daily digest saved:[/bold green]\n  {report_path}")
+    else:
+        console.print("\n[yellow]No articles found for the selected time window.[/yellow]")
+
+
 def cmd_sources(_args: argparse.Namespace) -> None:
     """List all registered information sources."""
     from src.storage.database import init_db, get_session
@@ -193,6 +210,11 @@ def build_parser() -> argparse.ArgumentParser:
     # run
     subparsers.add_parser("run", help="Execute one agent cycle and exit")
 
+    # digest
+    digest = subparsers.add_parser("digest", help="Run end-of-day digest and send report by email")
+    digest.add_argument("--hours",     type=int,   default=24, help="Lookback window in hours (default: 24)")
+    digest.add_argument("--min-score", type=float, default=30, help="Minimum relevance score (default: 30)")
+
     # schedule
     sched = subparsers.add_parser("schedule", help="Start recurring scheduler")
     sched.add_argument(
@@ -220,6 +242,7 @@ def main() -> None:
         "run":      cmd_run,
         "schedule": cmd_schedule,
         "report":   cmd_report,
+        "digest":   cmd_digest,
         "status":   cmd_status,
         "sources":  cmd_sources,
     }
